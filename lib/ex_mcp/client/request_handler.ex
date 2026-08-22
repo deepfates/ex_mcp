@@ -209,7 +209,15 @@ defmodule ExMCP.Client.RequestHandler do
         # SSE and streaming transports - track pending request
         maybe_schedule_request_timeout(id, meta, updated_state)
         pending_requests = Map.put(updated_state.pending_requests, id, {from, :single, method})
-        new_state = %{updated_state | pending_requests: pending_requests}
+        monitor_ref = Process.monitor(elem(from, 0))
+
+        new_state = %{
+          updated_state
+          | pending_requests: pending_requests,
+            pending_caller_monitors:
+              Map.put(updated_state.pending_caller_monitors || %{}, monitor_ref, id)
+        }
+
         {:noreply, new_state}
 
       {:error, :not_connected} ->
@@ -475,16 +483,14 @@ defmodule ExMCP.Client.RequestHandler do
 
             GenServer.reply(from, {:error, error})
 
-            {:noreply,
-             %{state | pending_requests: Map.delete(state.pending_requests, request_id)}}
+            {:noreply, drop_pending_request(request_id, state)}
 
           {from, :single} ->
             error = request_stream_error(reason)
 
             GenServer.reply(from, {:error, error})
 
-            {:noreply,
-             %{state | pending_requests: Map.delete(state.pending_requests, request_id)}}
+            {:noreply, drop_pending_request(request_id, state)}
 
           _not_pending ->
             {:noreply, state}
@@ -615,8 +621,7 @@ defmodule ExMCP.Client.RequestHandler do
           )
 
           GenServer.reply(from, response_data)
-          new_pending_requests = Map.delete(pending_requests, response_id)
-          %{state | pending_requests: new_pending_requests}
+          drop_pending_request(response_id, state)
 
         {:ok, {from, :single}} ->
           :telemetry.execute(
@@ -626,8 +631,7 @@ defmodule ExMCP.Client.RequestHandler do
           )
 
           GenServer.reply(from, response_data)
-          new_pending_requests = Map.delete(pending_requests, response_id)
-          %{state | pending_requests: new_pending_requests}
+          drop_pending_request(response_id, state)
 
         {:ok, {:batch, batch_id}} ->
           handle_batch_response_item(response_data, response_id, batch_id, state)
@@ -1240,14 +1244,12 @@ defmodule ExMCP.Client.RequestHandler do
         {from, :single, _method} ->
           # Reply with cancelled error and remove from pending
           GenServer.reply(from, {:error, :cancelled})
-          new_pending = Map.delete(state.pending_requests, request_id)
-          {:noreply, %{updated_state | pending_requests: new_pending}}
+          {:noreply, drop_pending_request(request_id, updated_state)}
 
         {from, :single} ->
           # Reply with cancelled error and remove from pending
           GenServer.reply(from, {:error, :cancelled})
-          new_pending = Map.delete(state.pending_requests, request_id)
-          {:noreply, %{updated_state | pending_requests: new_pending}}
+          {:noreply, drop_pending_request(request_id, updated_state)}
 
         _ ->
           # Other types of requests (batch, etc.)
@@ -1256,6 +1258,28 @@ defmodule ExMCP.Client.RequestHandler do
     else
       Logger.warning("Received cancellation notification without requestId")
       {:noreply, state}
+    end
+  end
+
+  @doc false
+  def drop_pending_request(request_id, state) do
+    {monitor_ref, monitors} = pop_caller_monitor(state.pending_caller_monitors || %{}, request_id)
+
+    if is_reference(monitor_ref) do
+      Process.demonitor(monitor_ref, [:flush])
+    end
+
+    %{
+      state
+      | pending_requests: Map.delete(state.pending_requests, request_id),
+        pending_caller_monitors: monitors
+    }
+  end
+
+  defp pop_caller_monitor(monitors, request_id) do
+    case Enum.find(monitors, fn {_ref, id} -> id == request_id end) do
+      {monitor_ref, ^request_id} -> {monitor_ref, Map.delete(monitors, monitor_ref)}
+      nil -> {nil, monitors}
     end
   end
 

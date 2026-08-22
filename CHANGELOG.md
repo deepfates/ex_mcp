@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pending single MCP requests are now owned by their calling process. If the
+  caller exits or its request times out, the client retires the local request,
+  cleans up its monitor, and sends the transport-appropriate cooperative
+  cancellation signal. Normal responses, peer cancellation, transport errors,
+  disconnects, and manual cancellation also release the caller monitor. This
+  prevents abandoned tool calls from remaining locally pending; as required by
+  MCP's cooperative model, it does not claim to roll back effects on a server
+  that ignores or cannot promptly process cancellation.
 - Full OAuth flow verification no longer expands broad inferred error and map
   unions that made compiling the module take minutes under Elixir 1.20.
 - The external MCP conformance client now round-trips complete JSON Schema
