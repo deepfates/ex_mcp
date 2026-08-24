@@ -64,6 +64,7 @@ defmodule ExMCP.ACP.Client do
   @default_handler_request_timeout 30_000
   @default_max_update_queue 32
   @default_max_update_queue_bytes 8_388_608
+  @max_handler_error_message_bytes 1_024
   @supported_protocol_versions [1]
 
   defstruct [
@@ -1736,6 +1737,18 @@ defmodule ExMCP.ACP.Client do
 
   defp encode_handler_response(%{kind: :terminal, id: id}, {:terminal, {:ok, result}}) do
     Protocol.encode_response(result, id)
+  end
+
+  defp encode_handler_response(%{id: id}, {_kind, {:error, reason}})
+       when is_binary(reason) do
+    Logger.warning("ACP client handler denied or failed a request")
+
+    Protocol.encode_error(
+      -32603,
+      valid_utf8_prefix(reason, @max_handler_error_message_bytes),
+      nil,
+      id
+    )
   end
 
   defp encode_handler_response(%{id: id}, {_kind, {:error, reason}}) do

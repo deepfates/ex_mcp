@@ -541,6 +541,26 @@ defmodule ExMCP.ACP.ClientTest do
     end
   end
 
+  defmodule StringErrorHandler do
+    @behaviour ExMCP.ACP.Client.Handler
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_session_update(_session_id, _update, state), do: {:ok, state}
+
+    @impl true
+    def handle_permission_request(_session_id, _tool_call, _options, state) do
+      {:error, "Permission denied", state}
+    end
+
+    @impl true
+    def handle_file_read(_session_id, _path, _opts, state) do
+      {:error, "Permission denied", state}
+    end
+  end
+
   # Handler that implements file_read, file_write, AND terminal.
   defmodule FullCapabilityHandler do
     @behaviour ExMCP.ACP.Client.Handler
@@ -900,6 +920,21 @@ defmodule ExMCP.ACP.ClientTest do
   end
 
   describe "inbound agent request hardening" do
+    test "preserves a handler's bounded user-facing string error" do
+      {client, _agent} =
+        start_client(
+          [agent_request: {"fs/read_text_file", %{"path" => "/tmp/file.txt"}}],
+          handler: StringErrorHandler
+        )
+
+      assert {:ok, %{"sessionId" => session_id}} = Client.new_session(client, "/tmp")
+      assert {:ok, _result} = Client.prompt(client, session_id, "read")
+
+      assert_receive {:agent_request_response, %{"error" => error}}
+      assert error["code"] == -32_603
+      assert error["message"] == "Permission denied"
+    end
+
     test "dispatches an advertised form elicitation and returns accepted content" do
       {client, _agent} =
         start_client(
