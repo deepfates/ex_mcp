@@ -1011,7 +1011,13 @@ defmodule ExMCP.ACP.Adapters.Codex do
   defp handle_notification("thread/started", params, state) do
     thread = params["thread"] || %{}
     session_id = Sessions.thread_id(thread, params)
-    session = session_from_result(session_id, params, state)
+
+    session =
+      case Sessions.fetch(state, session_id) do
+        {:ok, existing} -> merge_thread_started(existing, params, state)
+        {:error, _reason} -> session_from_result(session_id, params, state)
+      end
+
     {:skip, Sessions.put(state, session_id, session)}
   end
 
@@ -2397,6 +2403,30 @@ defmodule ExMCP.ACP.Adapters.Codex do
   defp session_from_result(session_id, result, state) do
     Sessions.from_result(session_id, result, state, &model_id_for_session(&1, state))
   end
+
+  # Codex may deliver thread/started after the thread/start response. The
+  # notification often carries only thread identity, so rebuilding the session
+  # from it would erase the model and reasoning settings learned from the
+  # response. Merge only fields the notification actually supplies.
+  defp merge_thread_started(existing, params, state) do
+    thread = params["thread"] || %{}
+    model = params["model"] || existing[:model]
+    effort = params["reasoningEffort"] || existing[:reasoning_effort]
+
+    existing
+    |> Map.put(:thread, Map.merge(existing[:thread] || %{}, thread))
+    |> maybe_put_session_value(:cwd, params["cwd"] || thread["cwd"])
+    |> maybe_put_session_value(:model, model)
+    |> maybe_put_session_value(:reasoning_effort, effort)
+    |> maybe_put_session_value(:service_tier, params["serviceTier"])
+    |> maybe_put_session_value(:additional_directories, params["additionalDirectories"])
+    |> then(fn session ->
+      Map.put(session, :model_id, model_id_for_session(session, state))
+    end)
+  end
+
+  defp maybe_put_session_value(session, _key, nil), do: session
+  defp maybe_put_session_value(session, key, value), do: Map.put(session, key, value)
 
   defp fetch_turn_id(%{"turnId" => turn_id}, _session) when is_binary(turn_id) and turn_id != "",
     do: {:ok, turn_id}

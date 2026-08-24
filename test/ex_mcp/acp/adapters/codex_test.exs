@@ -621,6 +621,47 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       }
     end
 
+    test "a sparse thread/started notification preserves negotiated session config", %{
+      state: state
+    } do
+      state =
+        put_test_session(state, "thread-1", %{
+          model: "gpt-5.6-sol",
+          model_id: "gpt-5.6-sol/medium",
+          reasoning_effort: "medium",
+          additional_directories: ["/tmp/shared"]
+        })
+
+      started =
+        Jason.encode!(%{
+          "method" => "thread/started",
+          "params" => %{"thread" => %{"id" => "thread-1", "cwd" => "/tmp/project"}}
+        })
+
+      assert {:skip, state} = Codex.translate_inbound(started, state)
+      session = state.sessions["thread-1"]
+      assert session.model == "gpt-5.6-sol"
+      assert session.reasoning_effort == "medium"
+      assert session.additional_directories == ["/tmp/shared"]
+
+      request = %{
+        "method" => "session/set_config_option",
+        "id" => 9,
+        "params" => %{
+          "sessionId" => "thread-1",
+          "configId" => "reasoning_effort",
+          "value" => "low"
+        }
+      }
+
+      assert {:reply, result, _state} = Codex.translate_outbound(request, state)
+
+      assert Enum.any?(
+               result["configOptions"],
+               &(&1["id"] == "model" && &1["currentValue"] == "gpt-5.6-sol")
+             )
+    end
+
     test "routes text deltas to the session from params", %{state: state} do
       line =
         Jason.encode!(%{
