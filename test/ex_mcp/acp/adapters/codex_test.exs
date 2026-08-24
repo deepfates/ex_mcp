@@ -215,7 +215,7 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       assert codex_msg["method"] == "thread/resume"
       assert codex_msg["params"]["threadId"] == "thread-1"
       assert codex_msg["params"]["model"] == "gpt-5"
-      assert codex_msg["params"]["initialTurnsPage"]["itemsView"] == "full"
+      refute Map.has_key?(codex_msg["params"], "initialTurnsPage")
     end
 
     test "session/list sends thread/list", %{state: state} do

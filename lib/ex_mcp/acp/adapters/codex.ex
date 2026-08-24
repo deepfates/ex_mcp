@@ -270,10 +270,7 @@ defmodule ExMCP.ACP.Adapters.Codex do
         case session_config(params, cwd, state) do
           {:ok, config, additional_directories} ->
             wire_params =
-              %{
-                "threadId" => session_id,
-                "initialTurnsPage" => %{"limit" => 100, "itemsView" => "full"}
-              }
+              %{"threadId" => session_id}
               |> maybe_put("model", params["model"] || state.model)
               |> maybe_put("modelProvider", resume_model_provider(state))
               |> maybe_put("cwd", cwd)
