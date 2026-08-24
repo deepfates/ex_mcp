@@ -88,6 +88,7 @@ defmodule ExMCP.ACP.Client do
     pending_requests: %{},
     pending_caller_monitors: %{},
     pending_agent_requests: %{},
+    event_listener_drops: %{},
     sessions: %{},
     # Accumulates streamed agent_message_chunk text per session so a synchronous
     # prompt/3 can return it — agents that stream the answer via session/update
@@ -202,6 +203,26 @@ defmodule ExMCP.ACP.Client do
   def prompt(client, session_id, content, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 300_000)
     GenServer.call(client, {:prompt, session_id, content}, timeout)
+  end
+
+  @doc """
+  Places an ordered barrier after session updates already offered to the event listener.
+
+  The configured listener receives
+  `{:acp_event_listener_barrier, client, ref, session_id, metadata}`. Messages
+  from the client process are ordered, so processing that barrier proves the
+  listener has already processed every preceding delivered update. The
+  metadata includes `:dropped_updates`; a non-zero value means the bounded
+  listener queue rejected updates since the previous barrier and a durable
+  projection must not claim a complete turn.
+
+  This does not wait for the listener to process the barrier. The returned
+  reference lets an application correlate it with its own request lifecycle.
+  """
+  @spec event_listener_barrier(GenServer.server(), String.t()) ::
+          {:ok, reference()} | {:error, :event_listener_unavailable}
+  def event_listener_barrier(client, session_id) when is_binary(session_id) do
+    GenServer.call(client, {:event_listener_barrier, session_id})
   end
 
   @doc "Lists available sessions from the agent. Stabilized in ACP spec March 9, 2026."
@@ -530,6 +551,24 @@ defmodule ExMCP.ACP.Client do
 
   def handle_call(:status, _from, state) do
     {:reply, state.status, state}
+  end
+
+  def handle_call({:event_listener_barrier, session_id}, _from, state) do
+    if is_pid(state.event_listener) and Process.alive?(state.event_listener) do
+      ref = make_ref()
+      dropped_updates = Map.get(state.event_listener_drops, session_id, 0)
+
+      send(
+        state.event_listener,
+        {:acp_event_listener_barrier, self(), ref, session_id,
+         %{dropped_updates: dropped_updates}}
+      )
+
+      {:reply, {:ok, ref},
+       %{state | event_listener_drops: Map.delete(state.event_listener_drops, session_id)}}
+    else
+      {:reply, {:error, :event_listener_unavailable}, state}
+    end
   end
 
   def handle_call({:close_session, session_id}, from, %{status: :ready} = state) do
@@ -1297,16 +1336,25 @@ defmodule ExMCP.ACP.Client do
 
     # Notify event listener from the client process so a slow handler cannot
     # stall the update stream.
-    if is_pid(state.event_listener) and
-         update_mailbox_below_limits?(
-           state.event_listener,
-           state.max_update_queue,
-           state.max_update_queue_bytes,
-           update_bytes,
-           :listener
-         ) do
-      send(state.event_listener, {:acp_session_update, session_id, update})
-    end
+    state =
+      if is_pid(state.event_listener) do
+        if update_mailbox_below_limits?(
+             state.event_listener,
+             state.max_update_queue,
+             state.max_update_queue_bytes,
+             update_bytes,
+             :listener
+           ) do
+          send(state.event_listener, {:acp_session_update, session_id, update})
+          state
+        else
+          update_in(state.event_listener_drops, fn drops ->
+            Map.update(drops, session_id, 1, &(&1 + 1))
+          end)
+        end
+      else
+        state
+      end
 
     if state.handler_pid do
       HandlerRunner.session_update(

@@ -456,6 +456,30 @@ receive do
 end
 ```
 
+The listener queue is deliberately bounded. A durable consumer that must order
+turn completion after every delivered update should place a barrier after the
+prompt response:
+
+```elixir
+{:ok, barrier_ref} =
+  ExMCP.ACP.Client.event_listener_barrier(client, session_id)
+
+receive do
+  {:acp_event_listener_barrier, ^client, ^barrier_ref, ^session_id,
+   %{dropped_updates: 0}} ->
+    :projection_is_current
+
+  {:acp_event_listener_barrier, ^client, ^barrier_ref, ^session_id,
+   %{dropped_updates: count}} ->
+    {:projection_incomplete, count}
+end
+```
+
+The barrier is sent by the same client process as the update messages, so BEAM
+mailbox ordering makes it an ordered cut through delivered updates. It does not
+turn the bounded listener into an unbounded queue: any rejected update is
+reported in the barrier metadata and must be handled explicitly.
+
 ## Session Update Types
 
 The ACP spec defines these session update types (all supported by ExMCP):

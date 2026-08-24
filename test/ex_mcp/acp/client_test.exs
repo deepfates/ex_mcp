@@ -1743,6 +1743,39 @@ defmodule ExMCP.ACP.ClientTest do
       assert queued <= 2
     end
 
+    test "places a loss-aware event barrier after preceding listener updates" do
+      updates =
+        for index <- 1..5 do
+          %{
+            "sessionUpdate" => "agent_message_chunk",
+            "content" => %{"type" => "text", "text" => "chunk-#{index}"}
+          }
+        end
+
+      {client, _agent} =
+        start_client([updates: updates], event_listener: self(), max_update_queue: 2)
+
+      assert_receive {:initialize_request, _params}
+      assert {:ok, %{"sessionId" => session_id}} = Client.new_session(client, "/tmp")
+      assert_receive {:new_session_request, _params}
+      assert {:ok, _result} = Client.prompt(client, session_id, "stream")
+      assert {:ok, barrier_ref} = Client.event_listener_barrier(client, session_id)
+
+      assert_receive {:acp_session_update, ^session_id, first_update}
+      assert first_update["content"]["text"] == "chunk-1"
+
+      assert_receive {:acp_session_update, ^session_id, second_update}
+      assert second_update["content"]["text"] == "chunk-2"
+
+      assert_receive {:acp_event_listener_barrier, ^client, ^barrier_ref, ^session_id,
+                      %{dropped_updates: 3}}
+
+      assert {:ok, next_ref} = Client.event_listener_barrier(client, session_id)
+
+      assert_receive {:acp_event_listener_barrier, ^client, ^next_ref, ^session_id,
+                      %{dropped_updates: 0}}
+    end
+
     test "rejects malformed and unknown session updates before dispatch" do
       {client, _agent} = start_client([], event_listener: self())
       assert {:ok, %{"sessionId" => session_id}} = Client.new_session(client, "/tmp")
