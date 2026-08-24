@@ -177,6 +177,7 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       assert codex_msg["params"]["cwd"] == "/tmp/project"
       assert codex_msg["params"]["sandbox"] == "workspace-write"
       assert codex_msg["params"]["approvalPolicy"] == "on-request"
+      assert codex_msg["params"]["approvalsReviewer"] == "user"
 
       assert get_in(codex_msg, ["params", "config", "mcp_servers", "remote_tools", "url"]) ==
                "http://localhost:4000/mcp"
@@ -286,6 +287,7 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
 
       assert codex_msg["method"] == "turn/start"
       assert codex_msg["params"]["threadId"] == "thread-1"
+      assert codex_msg["params"]["approvalsReviewer"] == "user"
       assert Enum.at(codex_msg["params"]["input"], 1)["text"] == "[@lib.ex](file:///tmp/lib.ex)"
 
       assert Enum.at(codex_msg["params"]["input"], 2)["text"] =~

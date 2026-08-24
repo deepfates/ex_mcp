@@ -22,7 +22,14 @@ defmodule ExMCP.ACP.Adapters.Codex.ConfigTest do
     assert Config.merge_mode_wire_params(%{"model" => "gpt-5"}, "read-only") == %{
              "model" => "gpt-5",
              "sandbox" => "read-only",
-             "approvalPolicy" => "on-request"
+             "approvalPolicy" => "on-request",
+             "approvalsReviewer" => "user"
+           }
+
+    assert Config.merge_turn_mode_wire_params(%{}, "read-only") == %{
+             "sandboxPolicy" => %{"type" => "readOnly", "networkAccess" => false},
+             "approvalPolicy" => "on-request",
+             "approvalsReviewer" => "user"
            }
 
     assert Config.merge_mode_wire_params(%{}, "unknown") == %{}
