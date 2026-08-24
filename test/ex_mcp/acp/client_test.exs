@@ -628,7 +628,7 @@ defmodule ExMCP.ACP.ClientTest do
   end
 
   describe "initialize handshake" do
-    test "stores agent capabilities" do
+    test "exposes the negotiated initialize handshake" do
       {client, _agent} = start_client()
 
       assert {:ok, caps} = Client.agent_capabilities(client)
@@ -639,6 +639,14 @@ defmodule ExMCP.ACP.ClientTest do
       assert [%{"id" => "api-key"}] = auth_methods
 
       assert Client.status(client) == :ready
+
+      assert {:ok, info} = Client.connection_info(client)
+      assert info["protocolVersion"] == 1
+      assert info["agentInfo"] == %{"name" => "mock_agent", "version" => "1.0.0"}
+      assert info["agentCapabilities"] == caps
+      assert info["authMethods"] == auth_methods
+      assert is_map(info["clientCapabilities"])
+      assert info["status"] == :ready
     end
 
     test "honors a configurable total initialize timeout and closes the transport" do

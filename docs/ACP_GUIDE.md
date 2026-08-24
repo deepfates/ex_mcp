@@ -299,6 +299,9 @@ ExMCP.ACP.Client.cancel(client, sid)
 # Cancel a specific JSON-RPC request when you have its request id
 ExMCP.ACP.Client.cancel_request(client, request_id)
 
+# Inspect the negotiated protocol, agent identity, and capabilities
+{:ok, info} = ExMCP.ACP.Client.connection_info(client)
+
 # Configure the agent at runtime
 ExMCP.ACP.Client.set_mode(client, sid, "high")
 ExMCP.ACP.Client.set_config_option(client, sid, "model", "anthropic/claude-sonnet-4")

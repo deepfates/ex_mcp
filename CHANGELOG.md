@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ExMCP.ACP.Client.connection_info/1` exposes the protocol version, agent
+  identity and capabilities, authentication methods, advertised client
+  capabilities, and status retained from initialization, so host applications
+  do not need to reconstruct or reach into client state.
 - A weekly advisory workflow now runs the complete MCP 2026-07-28 conformance
   suites against the newest published official harness while keeping release CI
   pinned to a reviewed version.

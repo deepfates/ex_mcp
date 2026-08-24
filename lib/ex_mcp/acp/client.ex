@@ -264,6 +264,12 @@ defmodule ExMCP.ACP.Client do
     GenServer.call(client, :agent_capabilities)
   end
 
+  @doc "Returns the negotiated initialize handshake as a stable connection snapshot."
+  @spec connection_info(GenServer.server()) :: {:ok, map()}
+  def connection_info(client) do
+    GenServer.call(client, :connection_info)
+  end
+
   @doc "Returns the agent's authentication methods from the initialize handshake."
   @spec auth_methods(GenServer.server()) :: {:ok, [map()]}
   def auth_methods(client) do
@@ -503,6 +509,19 @@ defmodule ExMCP.ACP.Client do
 
   def handle_call(:agent_capabilities, _from, state) do
     {:reply, {:ok, state.agent_capabilities}, state}
+  end
+
+  def handle_call(:connection_info, _from, state) do
+    info = %{
+      "protocolVersion" => state.protocol_version,
+      "agentInfo" => state.agent_info,
+      "agentCapabilities" => state.agent_capabilities,
+      "authMethods" => state.auth_methods || [],
+      "clientCapabilities" => state.client_capabilities,
+      "status" => state.status
+    }
+
+    {:reply, {:ok, info}, state}
   end
 
   def handle_call(:auth_methods, _from, state) do
