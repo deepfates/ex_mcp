@@ -943,6 +943,9 @@ defmodule ExMCP.ACP.Client do
         {:error, error, ^request_id} ->
           {:error, {:agent_error, error}}
 
+        {:request, _method, _params, _id} ->
+          {:error, :invalid_initialize_response}
+
         _other ->
           # Skip non-matching messages during init without resetting the deadline.
           do_receive_init_response(request_id, deadline, max_frame_bytes)

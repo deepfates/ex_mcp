@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP client initialization now rejects an inbound JSON-RPC request instead of
+  waiting for the full initialize timeout. This makes echo processes and other
+  invalid peers fail promptly while still allowing unrelated notifications.
 - ACP client handlers can now return explicitly asynchronous permission, file,
   terminal, and elicitation work. ExMCP monitors and cancels that work by the
   original agent-request identity, while keeping handler-state updates

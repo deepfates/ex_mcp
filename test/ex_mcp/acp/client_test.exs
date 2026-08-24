@@ -699,6 +699,40 @@ defmodule ExMCP.ACP.ClientTest do
       assert_receive :mock_acp_transport_closed, 200
     end
 
+    test "rejects an inbound request while awaiting initialize" do
+      {:ok, to_client_relay} = MessageRelay.start_link()
+      {:ok, to_agent_relay} = MessageRelay.start_link()
+      silent_agent = spawn_link(fn -> Process.sleep(:infinity) end)
+      test_pid = self()
+
+      MessageRelay.push(
+        to_client_relay,
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{}
+        })
+      )
+
+      assert {:error, :invalid_initialize_response} =
+               Task.async(fn ->
+                 Process.flag(:trap_exit, true)
+
+                 Client.start_link(
+                   transport_mod: MockACPTransport,
+                   command: ["mock"],
+                   agent_pid: silent_agent,
+                   to_client_relay: to_client_relay,
+                   to_agent_relay: to_agent_relay,
+                   close_listener: test_pid
+                 )
+               end)
+               |> Task.await()
+
+      assert_receive :mock_acp_transport_closed, 200
+    end
+
     test "accepts a delayed initialize response within the configured budget" do
       {client, _agent} =
         start_client([initialize_delay_ms: 40], initialize_timeout: 200)
