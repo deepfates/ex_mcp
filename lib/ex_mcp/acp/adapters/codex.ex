@@ -1047,7 +1047,9 @@ defmodule ExMCP.ACP.Adapters.Codex do
 
     state =
       Sessions.update(state, session_id, fn session ->
-        Map.put(session, :turn_id, turn_id)
+        session
+        |> Map.put(:turn_id, turn_id)
+        |> Map.put(:streamed_agent_items, MapSet.new())
       end)
 
     {:skip, state}
@@ -1061,6 +1063,11 @@ defmodule ExMCP.ACP.Adapters.Codex do
       Sessions.update(state, session_id, fn session ->
         session
         |> Map.update(:accumulated_text, [delta], &[delta | &1])
+        |> Map.update(
+          :streamed_agent_items,
+          MapSet.new([agent_item_id(params)]),
+          &MapSet.put(&1, agent_item_id(params))
+        )
         |> Map.put(:prompt_activity, true)
       end)
 
@@ -2130,12 +2137,24 @@ defmodule ExMCP.ACP.Adapters.Codex do
   end
 
   defp handle_item_completed(session_id, %{"type" => "agent_message"} = item, state) do
-    text = item["text"] || item["message"] || ""
+    case consume_streamed_agent_item(state, session_id, item) do
+      {true, state} ->
+        # Codex sends both live deltas and an item/completed snapshot for the
+        # same message. The snapshot confirms completion; it is not another
+        # message chunk. Emitting it duplicates both streamed UI text and the
+        # ACP client's accumulated prompt result.
+        {:skip, state}
 
-    notification =
-      AdapterEvents.agent_message_chunk(session_id, text, meta: %{"ex_mcp" => %{"final" => true}})
+      {false, state} ->
+        text = item["text"] || item["message"] || ""
 
-    {:messages, [notification], state}
+        notification =
+          AdapterEvents.agent_message_chunk(session_id, text,
+            meta: %{"ex_mcp" => %{"final" => true}}
+          )
+
+        {:messages, [notification], state}
+    end
   end
 
   defp handle_item_completed(session_id, %{"type" => "agentMessage"} = item, state) do
@@ -2289,6 +2308,36 @@ defmodule ExMCP.ACP.Adapters.Codex do
   end
 
   defp handle_item_completed(_session_id, _item, state), do: {:skip, state}
+
+  defp consume_streamed_agent_item(nil, _session_id, _item), do: {false, nil}
+
+  defp consume_streamed_agent_item(state, session_id, item) do
+    session = Map.get(state.sessions, session_id, %{})
+    streamed = Map.get(session, :streamed_agent_items, MapSet.new())
+    item_id = agent_item_id(item)
+
+    matched_id =
+      cond do
+        MapSet.member?(streamed, item_id) -> item_id
+        MapSet.member?(streamed, :anonymous) -> :anonymous
+        true -> nil
+      end
+
+    if matched_id do
+      state =
+        Sessions.update(state, session_id, fn current ->
+          Map.update(current, :streamed_agent_items, MapSet.new(), &MapSet.delete(&1, matched_id))
+        end)
+
+      {true, state}
+    else
+      {false, state}
+    end
+  end
+
+  defp agent_item_id(value) do
+    value["itemId"] || value["item_id"] || value["id"] || :anonymous
+  end
 
   defp maybe_add_image_revised_prompt(content, prompt) when is_binary(prompt) and prompt != "" do
     content ++ [Events.tool_text_content("Revised prompt: #{prompt}")]

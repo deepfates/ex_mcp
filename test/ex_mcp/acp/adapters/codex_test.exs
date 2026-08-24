@@ -636,6 +636,47 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       assert new_state.sessions["thread-1"].prompt_activity
     end
 
+    test "does not emit the completed snapshot after streaming the same agent message", %{
+      state: state
+    } do
+      delta =
+        Jason.encode!(%{
+          "method" => "item/agentMessage/delta",
+          "params" => %{
+            "delta" => "Hello",
+            "threadId" => "thread-1",
+            "itemId" => "message-1"
+          }
+        })
+
+      completed =
+        Jason.encode!(%{
+          "method" => "item/completed",
+          "params" => %{
+            "threadId" => "thread-1",
+            "item" => %{"id" => "message-1", "type" => "agentMessage", "text" => "Hello"}
+          }
+        })
+
+      assert {:messages, [_chunk], state} = Codex.translate_inbound(delta, state)
+      assert {:skip, state} = Codex.translate_inbound(completed, state)
+      assert state.sessions["thread-1"].streamed_agent_items == MapSet.new()
+    end
+
+    test "emits a completed agent message when no deltas were delivered", %{state: state} do
+      completed =
+        Jason.encode!(%{
+          "method" => "item/completed",
+          "params" => %{
+            "threadId" => "thread-1",
+            "item" => %{"id" => "message-1", "type" => "agentMessage", "text" => "Hello"}
+          }
+        })
+
+      assert {:messages, [message], _state} = Codex.translate_inbound(completed, state)
+      assert get_in(message, ["params", "update", "content", "text"]) == "Hello"
+    end
+
     test "turn/completed responds to the active prompt for that session", %{state: state} do
       state =
         put_test_session(state, "thread-2", %{
