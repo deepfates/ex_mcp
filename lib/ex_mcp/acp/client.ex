@@ -967,6 +967,12 @@ defmodule ExMCP.ACP.Client do
 
         {:transport_message, raw} ->
           handle_init_frame(raw, request_id, deadline, max_frame_bytes)
+
+        {:transport_closed, _reason} ->
+          {:error, :transport_closed}
+
+        {:transport_error, reason} ->
+          {:error, {:transport_error, reason}}
       after
         remaining ->
           {:error, :init_timeout}

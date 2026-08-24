@@ -129,6 +129,25 @@ defmodule ExMCP.ACP.ClientTest do
     end
   end
 
+  defmodule ClosingDuringInitializeTransport do
+    @behaviour ExMCP.Transport
+
+    @impl true
+    def connect(_opts), do: {:ok, %{}}
+
+    @impl true
+    def send_message(_message, state), do: {:ok, state}
+
+    @impl true
+    def receive_message(_state), do: {:error, :closed}
+
+    @impl true
+    def close(_state), do: :ok
+
+    @impl true
+    def connected?(_state), do: false
+  end
+
   # MockACPAgent: reads from to_agent_relay, writes to to_client_relay.
   defmodule MockACPAgent do
     def start(to_client_relay, to_agent_relay, opts \\ []) do
@@ -692,6 +711,23 @@ defmodule ExMCP.ACP.ClientTest do
                |> Task.await()
 
       assert_receive :mock_acp_transport_closed, 200
+    end
+
+    test "fails immediately when the transport closes during initialize" do
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :transport_closed} =
+               Task.async(fn ->
+                 Process.flag(:trap_exit, true)
+
+                 Client.start_link(
+                   transport_mod: ClosingDuringInitializeTransport,
+                   command: ["closed"]
+                 )
+               end)
+               |> Task.await(1_000)
+
+      assert System.monotonic_time(:millisecond) - started_at < 1_000
     end
 
     test "unrelated initialize traffic cannot extend the total timeout" do
