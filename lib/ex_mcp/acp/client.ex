@@ -631,6 +631,7 @@ defmodule ExMCP.ACP.Client do
         {:noreply, state}
 
       {request, pending} ->
+        cancel_handler_request(state, ref)
         response = Protocol.encode_error(-32603, "Client handler timed out", nil, request.id)
         send_to_transport(response, state)
         {:noreply, %{state | pending_agent_requests: pending}}
@@ -1249,8 +1250,9 @@ defmodule ExMCP.ACP.Client do
       end
     end
 
-    Enum.each(state.pending_agent_requests, fn {_ref, request} ->
+    Enum.each(state.pending_agent_requests, fn {ref, request} ->
       cancel_timer(Map.get(request, :timer_ref))
+      cancel_handler_request(state, ref)
     end)
 
     %{
@@ -1702,8 +1704,9 @@ defmodule ExMCP.ACP.Client do
         request.kind in [:permission, :elicitation] and request.session_id == session_id
       end)
 
-    Enum.each(to_cancel, fn {_ref, request} ->
+    Enum.each(to_cancel, fn {ref, request} ->
       cancel_timer(request.timer_ref)
+      cancel_handler_request(state, ref)
 
       response =
         case request.kind do
@@ -1726,8 +1729,9 @@ defmodule ExMCP.ACP.Client do
         request.id == request_id
       end)
 
-    Enum.each(to_cancel, fn {_ref, request} ->
+    Enum.each(to_cancel, fn {ref, request} ->
       cancel_timer(request.timer_ref)
+      cancel_handler_request(state, ref)
       response = Protocol.encode_request_cancelled_error(request.id)
       send_to_transport(response, state)
     end)
@@ -1736,6 +1740,12 @@ defmodule ExMCP.ACP.Client do
   end
 
   defp handle_cancel_request_notification(_params, state), do: state
+
+  defp cancel_handler_request(%{handler_pid: pid}, ref) when is_pid(pid) do
+    HandlerRunner.cancel_request(pid, ref)
+  end
+
+  defp cancel_handler_request(_state, _ref), do: :ok
 
   defp safe_error_class({kind, reason, _stack}) when kind in [:error, :exit, :throw],
     do: "#{kind}:#{inspect(error_module(reason))}"

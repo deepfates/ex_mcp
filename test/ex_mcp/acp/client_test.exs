@@ -354,9 +354,20 @@ defmodule ExMCP.ACP.ClientTest do
 
         MessageRelay.push(state.to_client, perm_request)
 
-        if state.cancel_permission_request do
-          cancel_request = Jason.encode!(Protocol.encode_cancel_request(perm_id))
-          MessageRelay.push(state.to_client, cancel_request)
+        case state.cancel_permission_request do
+          true ->
+            cancel_request = Jason.encode!(Protocol.encode_cancel_request(perm_id))
+            MessageRelay.push(state.to_client, cancel_request)
+
+          :on_signal ->
+            receive do
+              :cancel_permission_request ->
+                cancel_request = Jason.encode!(Protocol.encode_cancel_request(perm_id))
+                MessageRelay.push(state.to_client, cancel_request)
+            end
+
+          false ->
+            :ok
         end
 
         # Wait for the permission response
@@ -478,6 +489,33 @@ defmodule ExMCP.ACP.ClientTest do
         5_000 ->
           {:ok, %{"outcome" => "cancelled"}, state}
       end
+    end
+  end
+
+  defmodule AsyncPermissionHandler do
+    @behaviour ExMCP.ACP.Client.Handler
+
+    @impl true
+    def init(opts), do: {:ok, %{parent: Keyword.fetch!(opts, :parent)}}
+
+    @impl true
+    def handle_session_update(_session_id, _update, state), do: {:ok, state}
+
+    @impl true
+    def handle_permission_request(_session_id, _tool_call, options, state) do
+      parent = state.parent
+
+      work = fn ->
+        send(parent, {:async_permission_handler_started, self()})
+
+        receive do
+          :release_permission_handler ->
+            option = List.first(options) || %{"optionId" => "allow"}
+            {:ok, %{"outcome" => "selected", "optionId" => option["optionId"]}}
+        end
+      end
+
+      {:async, work, state}
     end
   end
 
@@ -1474,13 +1512,13 @@ defmodule ExMCP.ACP.ClientTest do
         %{"optionId" => "deny", "name" => "Deny", "kind" => "reject_once"}
       ]
 
-      {client, _agent} =
+      {client, agent} =
         start_client(
           [
             permission_request: {tool_call, options},
-            cancel_permission_request: true
+            cancel_permission_request: :on_signal
           ],
-          handler: BlockingPermissionHandler,
+          handler: AsyncPermissionHandler,
           handler_opts: [parent: self()]
         )
 
@@ -1491,14 +1529,63 @@ defmodule ExMCP.ACP.ClientTest do
           Client.prompt(client, "sess_mock_001", "Write a file", timeout: 2_000)
         end)
 
-      assert_receive {:blocking_permission_handler_started, handler_pid}, 500
+      assert_receive {:async_permission_handler_started, worker}, 500
+      worker_monitor = Process.monitor(worker)
+      send(agent, :cancel_permission_request)
       assert_receive {:permission_response, resp}, 1_000
       assert resp["error"]["code"] == -32_800
       assert resp["error"]["message"] == "Request cancelled"
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}
 
       assert {:ok, _} = Task.await(task, 2_000)
-      send(handler_pid, :release_permission_handler)
       refute_receive {:permission_response, _late_response}, 200
+    end
+
+    test "handler timeout kills explicitly async work" do
+      tool_call = %{"toolCallId" => "tc_wait", "toolName" => "file_write"}
+      options = [%{"optionId" => "deny", "name" => "Deny", "kind" => "reject_once"}]
+
+      {client, _agent} =
+        start_client(
+          [permission_request: {tool_call, options}],
+          handler: AsyncPermissionHandler,
+          handler_opts: [parent: self()],
+          handler_request_timeout: 20
+        )
+
+      {:ok, _} = Client.new_session(client, "/tmp")
+      task = Task.async(fn -> Client.prompt(client, "sess_mock_001", "wait", timeout: 1_000) end)
+
+      assert_receive {:async_permission_handler_started, worker}
+      worker_monitor = Process.monitor(worker)
+      assert_receive {:permission_response, response}, 500
+      assert response["error"]["code"] == -32_603
+      assert response["error"]["message"] == "Client handler timed out"
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}
+      assert {:ok, _} = Task.await(task, 1_000)
+      assert :sys.get_state(client).pending_agent_requests == %{}
+    end
+
+    test "disconnect kills explicitly async work and resolves the prompt caller" do
+      tool_call = %{"toolCallId" => "tc_wait", "toolName" => "file_write"}
+      options = [%{"optionId" => "deny", "name" => "Deny", "kind" => "reject_once"}]
+
+      {client, _agent} =
+        start_client(
+          [permission_request: {tool_call, options}],
+          handler: AsyncPermissionHandler,
+          handler_opts: [parent: self()]
+        )
+
+      {:ok, _} = Client.new_session(client, "/tmp")
+      task = Task.async(fn -> Client.prompt(client, "sess_mock_001", "wait", timeout: 1_000) end)
+
+      assert_receive {:async_permission_handler_started, worker}
+      worker_monitor = Process.monitor(worker)
+      assert :ok = Client.disconnect(client)
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}
+      assert {:error, :disconnected} = Task.await(task, 1_000)
+      assert :sys.get_state(client).pending_agent_requests == %{}
     end
 
     test "expires a client handler request and ignores its late result" do

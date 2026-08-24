@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP client handlers can now return explicitly asynchronous permission, file,
+  terminal, and elicitation work. ExMCP monitors and cancels that work by the
+  original agent-request identity, while keeping handler-state updates
+  serialized. Long terminal waits and human decisions no longer prevent a
+  later kill/cancel callback from being dispatched, and timed-out, disconnected,
+  or cancelled requests cannot leave callback workers behind.
 - Pending single MCP requests are now owned by their calling process. If the
   caller exits or its request times out, the client retires the local request,
   cleans up its monitor, and sends the transport-appropriate cooperative

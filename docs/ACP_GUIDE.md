@@ -403,6 +403,33 @@ defmodule MyApp.ACPHandler do
 end
 ```
 
+Callbacks are serialized so their handler state remains coherent. A callback
+that must wait on a person or an external process can release that serialization
+boundary explicitly:
+
+```elixir
+def handle_terminal_request("terminal/wait_for_exit", params, _id, state) do
+  terminal_id = params["terminalId"]
+
+  work = fn ->
+    case MyApp.Terminals.wait_for_exit(terminal_id) do
+      {:ok, exit_code} -> {:ok, %{"exitCode" => exit_code}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  {:async, work, state}
+end
+```
+
+ExMCP owns and monitors this work. It is killed if the peer sends
+`$/cancel_request`, the handler deadline expires, the connection closes, or the
+handler runner terminates. Other callbacks—including `terminal/kill`—continue
+to run against the serialized state while it waits. The zero-arity function
+returns the callback result without handler state; any state change must be made
+in the state returned with `{:async, work, state}`. The same explicit form is
+available for permission, file, and elicitation callbacks.
+
 The client records canonical workspace roots when a session is created, loaded,
 resumed, or forked. It rejects filesystem paths and terminal working directories
 outside those roots, including escapes through existing symlinks. Nonexistent
