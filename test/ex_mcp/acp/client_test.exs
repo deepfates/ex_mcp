@@ -1759,7 +1759,8 @@ defmodule ExMCP.ACP.ClientTest do
       assert {:ok, %{"sessionId" => session_id}} = Client.new_session(client, "/tmp")
       assert_receive {:new_session_request, _params}
       assert {:ok, _result} = Client.prompt(client, session_id, "stream")
-      assert {:ok, barrier_ref} = Client.event_listener_barrier(client, session_id)
+      barrier_ref = make_ref()
+      assert {:ok, ^barrier_ref} = Client.event_listener_barrier(client, session_id, barrier_ref)
 
       assert_receive {:acp_session_update, ^session_id, first_update}
       assert first_update["content"]["text"] == "chunk-1"

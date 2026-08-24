@@ -219,10 +219,13 @@ defmodule ExMCP.ACP.Client do
   This does not wait for the listener to process the barrier. The returned
   reference lets an application correlate it with its own request lifecycle.
   """
-  @spec event_listener_barrier(GenServer.server(), String.t()) ::
+  @spec event_listener_barrier(GenServer.server(), String.t(), reference()) ::
           {:ok, reference()} | {:error, :event_listener_unavailable}
-  def event_listener_barrier(client, session_id) when is_binary(session_id) do
-    GenServer.call(client, {:event_listener_barrier, session_id})
+  def event_listener_barrier(client, session_id, ref \\ make_ref())
+
+  def event_listener_barrier(client, session_id, ref)
+      when is_binary(session_id) and is_reference(ref) do
+    GenServer.call(client, {:event_listener_barrier, session_id, ref})
   end
 
   @doc "Lists available sessions from the agent. Stabilized in ACP spec March 9, 2026."
@@ -553,9 +556,8 @@ defmodule ExMCP.ACP.Client do
     {:reply, state.status, state}
   end
 
-  def handle_call({:event_listener_barrier, session_id}, _from, state) do
+  def handle_call({:event_listener_barrier, session_id, ref}, _from, state) do
     if is_pid(state.event_listener) and Process.alive?(state.event_listener) do
-      ref = make_ref()
       dropped_updates = Map.get(state.event_listener_drops, session_id, 0)
 
       send(
