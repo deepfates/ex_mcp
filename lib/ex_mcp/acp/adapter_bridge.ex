@@ -1273,7 +1273,10 @@ defmodule ExMCP.ACP.AdapterBridge do
   end
 
   defp do_close(%{port: port} = state) do
-    PortRunner.close(port)
+    case PortRunner.close(port) do
+      :ok -> :ok
+      {:error, reason} -> exit({:adapter_process_close_failed, reason})
+    end
 
     state =
       state

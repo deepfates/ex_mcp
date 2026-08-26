@@ -3,6 +3,16 @@ defmodule ExMCP.Internal.OwnedProcessTest do
 
   alias ExMCP.Internal.OwnedProcess
 
+  test "a short-lived process remains observable until its handle is closed" do
+    executable = System.find_executable("true") || flunk("true executable is required")
+
+    assert {:ok, process} = OwnedProcess.open(executable, [], cd: File.cwd!(), env: [])
+    assert_receive {^process, {:exit_status, 0}}, 1_000
+    assert_receive {^process, :eof}, 1_000
+    refute OwnedProcess.alive?(process)
+    assert :ok = OwnedProcess.close(process)
+  end
+
   @tag :unix
   test "owner death tears down the isolated process group" do
     parent = self()

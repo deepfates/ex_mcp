@@ -84,7 +84,7 @@ defmodule ExMCP.ACP.AdapterTransport do
   def close(%__MODULE__{bridge: bridge}) do
     AdapterBridge.close(bridge)
   catch
-    :exit, _ -> :ok
+    :exit, {:noproc, _call} -> :ok
   end
 
   @impl true

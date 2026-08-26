@@ -34,7 +34,7 @@ defmodule ExMCP.ACP.AdapterBridge.PortRunner do
   @spec command(OwnedProcess.t(), iodata()) :: :ok | {:error, term()}
   def command(process, data), do: OwnedProcess.command(process, data)
 
-  @spec close(OwnedProcess.t() | nil) :: :ok
+  @spec close(OwnedProcess.t() | nil) :: :ok | {:error, term()}
   def close(process), do: OwnedProcess.close(process)
 
   @spec safe_env(keyword(), module()) :: [{charlist(), charlist() | false}]

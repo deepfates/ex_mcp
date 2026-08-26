@@ -3,6 +3,8 @@ defmodule ExMCP.Internal.OwnedProcess do
 
   use GenServer
 
+  alias ExMCP.Internal.UnixProcessTree
+
   @shutdown_timeout_ms 2_500
   @kill_timeout_seconds 1
 
@@ -30,17 +32,22 @@ defmodule ExMCP.Internal.OwnedProcess do
     :exit, _reason -> {:error, :closed}
   end
 
-  @spec close(t() | nil) :: :ok
+  @spec close(t() | nil) :: :ok | {:error, term()}
   def close(nil), do: :ok
 
   def close(%__MODULE__{pid: pid}) do
     GenServer.call(pid, :close, @shutdown_timeout_ms + 500)
   catch
-    :exit, _reason -> :ok
+    :exit, {:noproc, _call} -> :ok
+    :exit, reason -> {:error, {:process_close_failed, reason}}
   end
 
   @spec alive?(t()) :: boolean()
-  def alive?(%__MODULE__{pid: pid}), do: Process.alive?(pid)
+  def alive?(%__MODULE__{pid: pid}) do
+    GenServer.call(pid, :alive?)
+  catch
+    :exit, _reason -> false
+  end
 
   @impl true
   def init({owner, executable, args, opts}) do
@@ -78,6 +85,11 @@ defmodule ExMCP.Internal.OwnedProcess do
 
   @impl true
   def handle_call(:handle, _from, state), do: {:reply, state.handle, state}
+  def handle_call(:alive?, _from, state), do: {:reply, is_pid(state.exec_pid), state}
+
+  def handle_call({:send, _data}, _from, %{exec_pid: nil} = state) do
+    {:reply, {:error, :closed}, state}
+  end
 
   def handle_call({:send, data}, _from, state) do
     {:reply, :exec.send(state.exec_pid, IO.iodata_to_binary(data)), state}
@@ -87,9 +99,15 @@ defmodule ExMCP.Internal.OwnedProcess do
     {:reply, :ok, %{state | owner: owner}}
   end
 
+  def handle_call(:close, _from, %{exec_pid: nil} = state) do
+    {:stop, :normal, :ok, %{state | closing?: true}}
+  end
+
   def handle_call(:close, _from, state) do
+    descendants = freeze_and_kill_descendants(state.handle.os_pid)
     :ok = stop_exec(state.exec_pid)
     await_down(state.monitor_ref, state.exec_pid, state.owner, state.handle)
+    :ok = UnixProcessTree.confirm_gone(descendants)
     {:stop, :normal, :ok, %{state | closing?: true}}
   end
 
@@ -109,7 +127,7 @@ defmodule ExMCP.Internal.OwnedProcess do
       send(state.owner, {state.handle, :eof})
     end
 
-    {:stop, :normal, %{state | monitor_ref: nil, exec_pid: nil}}
+    {:noreply, %{state | monitor_ref: nil, exec_pid: nil}}
   end
 
   def handle_info({:EXIT, exec_pid, _reason}, %{exec_pid: exec_pid} = state) do
@@ -123,7 +141,9 @@ defmodule ExMCP.Internal.OwnedProcess do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{exec_pid: exec_pid}) when is_pid(exec_pid) do
+  def terminate(_reason, %{exec_pid: exec_pid, handle: %{os_pid: os_pid}})
+      when is_pid(exec_pid) do
+    _descendants = freeze_and_kill_descendants(os_pid)
     stop_exec(exec_pid)
     :ok
   end
@@ -138,6 +158,19 @@ defmodule ExMCP.Internal.OwnedProcess do
     end
   catch
     :exit, _reason -> :ok
+  end
+
+  defp freeze_and_kill_descendants(os_pid) do
+    case :os.type() do
+      {:unix, _name} ->
+        case UnixProcessTree.freeze_and_kill_descendants(os_pid) do
+          {:ok, descendants} -> descendants
+          {:error, reason} -> exit({:process_tree_shutdown_failed, reason})
+        end
+
+      {:win32, _name} ->
+        []
+    end
   end
 
   defp await_down(monitor_ref, exec_pid, owner, handle) do

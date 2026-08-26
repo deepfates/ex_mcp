@@ -255,6 +255,38 @@ defmodule ExMCP.ACP.AdapterBridgeTest do
     refute os_process_alive?(child_pid)
   end
 
+  @tag :unix
+  test "closing an adapter subprocess kills descendants that create their own process group" do
+    shell = System.find_executable("sh")
+
+    script = """
+    set -m
+    sleep 120 &
+    child=$!
+    printf '%s %s\\n' $$ "$child"
+    wait
+    """
+
+    assert {:ok, process} =
+             PortRunner.open(shell, ["-c", script], [], MockAdapter)
+
+    [leader_pid, child_pid] =
+      process
+      |> receive_first_line()
+      |> String.split()
+      |> Enum.map(&String.to_integer/1)
+
+    on_exit(fn ->
+      force_kill(leader_pid)
+      force_kill(child_pid)
+    end)
+
+    assert os_process_group(leader_pid) != os_process_group(child_pid)
+    assert :ok = PortRunner.close(process)
+    refute os_process_alive?(leader_pid)
+    refute os_process_alive?(child_pid)
+  end
+
   test "rejects ACP frames larger than the configured bridge limit" do
     {:ok, bridge} =
       AdapterBridge.start_link(
@@ -367,6 +399,13 @@ defmodule ExMCP.ACP.AdapterBridgeTest do
     end
 
     :ok
+  end
+
+  defp os_process_group(pid) do
+    {output, 0} =
+      System.cmd("/bin/ps", ["-o", "pgid=", "-p", Integer.to_string(pid)], stderr_to_stdout: true)
+
+    output |> String.trim() |> String.to_integer()
   end
 
   defmodule ParamListAdapter do
