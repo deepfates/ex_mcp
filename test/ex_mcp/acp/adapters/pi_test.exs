@@ -1,6 +1,7 @@
 defmodule ExMCP.ACP.Adapters.PiTest do
   use ExUnit.Case, async: true
 
+  alias ExMCP.ACP.AdapterBridge.PortRunner
   alias ExMCP.ACP.Adapters.Pi
   alias ExMCP.ACP.Adapters.Pi.{Settings, SlashCommands}
   alias ExMCP.ACP.PromptQueue
@@ -605,14 +606,16 @@ defmodule ExMCP.ACP.Adapters.PiTest do
     test "managed model confirmation does not repeat the full model catalog", %{state: state} do
       executable = System.find_executable("elixir")
 
-      port =
-        Port.open({:spawn_executable, executable}, [
-          :binary,
-          args: ["-e", "Process.sleep(:infinity)"]
-        ])
+      {:ok, port} =
+        PortRunner.open(
+          executable,
+          ["-e", "Process.sleep(:infinity)"],
+          [],
+          Pi
+        )
 
       on_exit(fn ->
-        if Port.info(port), do: Port.close(port)
+        PortRunner.close(port)
       end)
 
       available_models =
