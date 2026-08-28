@@ -86,9 +86,51 @@ defmodule ExMCP.Transport do
       end
   """
 
+  alias ExMCP.Internal.PortEnvironment
+
   @type state :: any()
   @type message :: String.t() | map() | list()
   @type opts :: keyword()
+  @type child_environment :: [{String.t(), String.t() | false}]
+
+  @doc """
+  Builds the environment overrides for a subprocess transport.
+
+  This is the public counterpart to the environment policy used by ExMCP's
+  built-in stdio transports. Custom transports should pass the returned list
+  to their subprocess launcher. Under the default `:isolated` policy, ambient
+  variables outside a small runtime allowlist are represented with `false` so
+  the launcher removes them; explicit `:env` entries are then applied. The
+  `:inherit` policy returns only explicit overrides and is intended for trusted
+  deployments.
+
+  Names and values are returned as binaries. A `false` value means that the
+  inherited variable must be removed from the child environment.
+
+  ## Examples
+
+      {:ok, env} =
+        ExMCP.Transport.child_environment(
+          environment_policy: :isolated,
+          env: [{"NODE_ENV", "production"}]
+        )
+
+      {:error, {:invalid_environment_policy, :ambient}} =
+        ExMCP.Transport.child_environment(environment_policy: :ambient)
+  """
+  @spec child_environment(opts()) ::
+          {:ok, child_environment()} | {:error, {:invalid_environment_policy, term()}}
+  def child_environment(opts) when is_list(opts) do
+    with :ok <- PortEnvironment.validate_policy(opts) do
+      environment =
+        opts
+        |> PortEnvironment.base()
+        |> Map.merge(PortEnvironment.normalize(Keyword.get(opts, :env, [])))
+        |> Map.to_list()
+
+      {:ok, environment}
+    end
+  end
 
   @doc """
   Establishes a connection for the transport.

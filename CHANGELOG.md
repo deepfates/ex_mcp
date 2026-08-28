@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ExMCP.Transport.child_environment/1` exposes the built-in stdio isolation
+  policy to custom subprocess transports without requiring an internal-module
+  import.
 - `ExMCP.ACP.Client.connection_info/1` exposes the protocol version, agent
   identity and capabilities, authentication methods, advertised client
   capabilities, and status retained from initialization, so host applications

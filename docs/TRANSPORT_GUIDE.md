@@ -33,7 +33,23 @@ Supported options:
 - `:command` - executable plus arguments as a list.
 - `:cd` - subprocess working directory.
 - `:env` - environment variables as `{"KEY", "VALUE"}` tuples.
+- `:environment_policy` - `:isolated` by default, or `:inherit` for an
+  explicitly trusted subprocess.
 - `:timeout` - client operation timeout.
+
+Custom subprocess transports can apply the same policy without importing an
+internal ExMCP module:
+
+```elixir
+with {:ok, env} <- ExMCP.Transport.child_environment(opts) do
+  MyProcessLauncher.open(command, env: env)
+end
+```
+
+The returned names and values are binaries; `false` means that the launcher
+must remove an inherited variable. Under `:inherit`, the list contains only
+explicit overrides because the subprocess launcher retains the ambient
+environment itself.
 
 ## Streamable HTTP
 
