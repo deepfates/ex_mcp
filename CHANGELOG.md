@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP session lifecycle requests now reject HTTP and legacy SSE MCP server
+  descriptors unless the agent advertised the corresponding official
+  `mcpCapabilities` flag. Stdio remains mandatory and does not require an
+  optional capability.
 - ACP client initialization now rejects an inbound JSON-RPC request instead of
   waiting for the full initialize timeout. This makes echo processes and other
   invalid peers fail promptly while still allowing unrelated notifications.

@@ -787,11 +787,18 @@ ACP agents can use MCP servers as tool providers. Pass MCP server configurations
 {:ok, %{"sessionId" => sid}} = ExMCP.ACP.Client.new_session(client, "/project",
   additional_directories: ["/shared/docs"],
   mcp_servers: [
-    ExMCP.ACP.Types.stdio_mcp_server("local-tools", "my_mcp_server", args: ["--stdio"]),
+    ExMCP.ACP.Types.stdio_mcp_server("local-tools", "/path/to/my_mcp_server",
+      args: ["--stdio"]
+    ),
     ExMCP.ACP.Types.http_mcp_server("remote-tools", "http://localhost:4000/mcp")
   ]
 )
 ```
+
+All ACP agents support stdio MCP descriptors. ExMCP sends HTTP or legacy SSE
+descriptors only when the initialized agent advertises the corresponding
+official `mcpCapabilities` flag; otherwise the lifecycle call fails locally
+with `{:unsupported_capability, :mcp_http}` or `:mcp_sse`.
 
 ## ACP Registry
 

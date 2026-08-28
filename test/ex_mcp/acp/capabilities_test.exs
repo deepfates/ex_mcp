@@ -34,6 +34,8 @@ defmodule ExMCP.ACP.CapabilitiesTest do
           "additionalDirectories" => %{}
         },
         "mcpCapabilities" => %{
+          "http" => true,
+          "sse" => true,
           "_meta" => %{"ex_mcp.mcpCapabilities" => %{"beam" => true}}
         },
         "session" => %{"configOptions" => %{"boolean" => %{}}},
@@ -46,6 +48,8 @@ defmodule ExMCP.ACP.CapabilitiesTest do
       assert Capabilities.supported?(caps, :session_fork)
       assert Capabilities.supported?(caps, :additional_directories)
       assert Capabilities.supported?(caps, :mcp_beam)
+      assert Capabilities.supported?(caps, :mcp_http)
+      assert Capabilities.supported?(caps, :mcp_sse)
       assert Capabilities.supported?(caps, :logout)
       assert Capabilities.supported?(caps, :boolean_config_options)
       refute Capabilities.supported?(caps, :session_delete)

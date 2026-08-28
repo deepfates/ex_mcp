@@ -21,15 +21,33 @@ defmodule ExMCP.ACP.LifecycleParams do
   def validate(opts, capabilities) do
     additional_directories = Keyword.get(opts, :additional_directories)
     mcp_servers = mcp_servers(opts)
+    capabilities = capabilities || %{}
+
+    with :ok <- validate_mcp_servers(mcp_servers, capabilities),
+         do: validate_additional_directories(additional_directories, capabilities)
+  end
+
+  defp validate_mcp_servers(mcp_servers, capabilities) do
+    unsupported_mcp_transport = unsupported_mcp_transport(mcp_servers, capabilities)
 
     cond do
       removed_native_mcp_servers?(mcp_servers) ->
         {:error, {:invalid_params, :native_mcp_removed}}
 
-      invalid_beam_mcp_servers?(mcp_servers, capabilities || %{}) ->
+      unsupported_mcp_transport ->
+        {:error, {:unsupported_capability, unsupported_mcp_transport}}
+
+      invalid_beam_mcp_servers?(mcp_servers, capabilities) ->
         {:error, {:unsupported_capability, :mcp_beam}}
 
-      not Capabilities.supported?(capabilities || %{}, :additional_directories) ->
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_additional_directories(additional_directories, capabilities) do
+    cond do
+      not Capabilities.supported?(capabilities, :additional_directories) ->
         if is_nil(additional_directories) do
           :ok
         else
@@ -117,6 +135,22 @@ defmodule ExMCP.ACP.LifecycleParams do
     Enum.any?(servers, &beam_mcp_server?/1) and
       not Capabilities.supported?(capabilities, :mcp_beam)
   end
+
+  defp unsupported_mcp_transport(servers, capabilities) do
+    Enum.find_value(servers, fn server ->
+      case server_type(server) do
+        "http" -> if Capabilities.supported?(capabilities, :mcp_http), do: nil, else: :mcp_http
+        "sse" -> if Capabilities.supported?(capabilities, :mcp_sse), do: nil, else: :mcp_sse
+        _stdio_or_extension -> nil
+      end
+    end)
+  end
+
+  defp server_type(%{"type" => type}), do: to_string(type)
+  defp server_type(%{type: type}), do: to_string(type)
+  defp server_type(%{"url" => _url}), do: "http"
+  defp server_type(%{url: _url}), do: "http"
+  defp server_type(_server), do: "stdio"
 
   defp beam_mcp_server?(%{"type" => type}) when type in ["beam"], do: true
   defp beam_mcp_server?(%{type: type}) when type in [:beam, "beam"], do: true
