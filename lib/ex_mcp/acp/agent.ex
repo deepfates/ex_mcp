@@ -369,6 +369,7 @@ defmodule ExMCP.ACP.Agent do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
+    pin_utf8_stdio()
 
     handler_mod = Keyword.fetch!(opts, :handler)
     handler_opts = Keyword.get(opts, :handler_opts, [])
@@ -678,6 +679,21 @@ defmodule ExMCP.ACP.Agent do
       nil -> "0.1.0"
       vsn -> to_string(vsn)
     end
+  end
+
+  defp pin_utf8_stdio do
+    # Mix.Task group_leader is often a File io server distinct from
+    # :standard_io. Piped latin1 File + IO.puts(em dash) exits the agent
+    # with {:no_translation, :unicode, :latin1}.
+    devices = [:standard_io, :standard_error, Process.group_leader()] |> Enum.uniq()
+
+    Enum.each(devices, fn device ->
+      try do
+        _ = :io.setopts(device, encoding: :utf8)
+      catch
+        _kind, _reason -> :ok
+      end
+    end)
   end
 
   defp start_receiver(parent, transport_mod, transport_state) do

@@ -24,6 +24,10 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
     if output in [:stdio, :standard_io] do
       StdioLoggerConfig.configure()
+      # ACP JSON is UTF-8. Without this, a latin1 :standard_io (common when
+      # LANG is unset) crashes IO.puts with {:no_translation, :unicode, :latin1}.
+      _ = :io.setopts(:standard_io, encoding: :utf8)
+      _ = :io.setopts(:standard_error, encoding: :utf8)
     end
 
     {:ok,
@@ -41,8 +45,12 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
   def send_message(message, %__MODULE__{output: output} = state)
       when is_binary(message) do
-    IO.puts(output, message)
-    {:ok, state}
+    device = stdio_device(output)
+
+    case write_utf8_frame(device, message) do
+      :ok -> {:ok, state}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @impl true
@@ -108,4 +116,25 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
   @impl true
   def connected?(%__MODULE__{closed?: closed?}), do: not closed?
+
+  defp stdio_device(:stdio), do: :standard_io
+  defp stdio_device(:standard_io), do: :standard_io
+  defp stdio_device(device), do: device
+
+  # Force latin1 byte mode then write raw UTF-8. Unicode put_chars on a
+  # Mix/File latin1 server exits {:no_translation, :unicode, :latin1};
+  # IO.binwrite on a unicode server double-encodes. :file.write after
+  # encoding: :latin1 is correct for both pipe and File devices.
+  defp write_utf8_frame(device, message) do
+    frame = IO.iodata_to_binary([message, ?\n])
+
+    _ =
+      try do
+        :io.setopts(device, encoding: :latin1)
+      catch
+        _kind, _reason -> :ok
+      end
+
+    :file.write(device, frame)
+  end
 end
