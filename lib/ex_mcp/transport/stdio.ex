@@ -34,11 +34,17 @@ defmodule ExMCP.Transport.Stdio do
 
   require Logger
 
-  alias ExMCP.Internal.{LineBuffer, LogSummary, Options, PortEnvironment, SecurityConfig}
+  alias ExMCP.Internal.{
+    LineBuffer,
+    LogSummary,
+    Options,
+    OwnedProcess,
+    PortEnvironment,
+    SecurityConfig
+  }
+
   alias ExMCP.Transport.{Error, SecurityGuard}
 
-  @termination_poll_ms 10
-  @termination_grace_attempts 10
   @default_max_frame_bytes 1_048_576
   defstruct [
     :port,
@@ -58,23 +64,6 @@ defmodule ExMCP.Transport.Stdio do
 
   defp do_connect(opts) do
     command = Keyword.fetch!(opts, :command)
-
-    port_opts = [
-      :binary,
-      :exit_status,
-      :use_stdio,
-      :hide,
-      :stream,
-      line: 1_000_000,
-      args: tl(command),
-      env: safe_env(opts)
-    ]
-
-    port_opts =
-      case Keyword.get(opts, :cd) do
-        nil -> port_opts
-        dir -> [{:cd, to_charlist(dir)} | port_opts]
-      end
 
     executable = hd(command)
 
@@ -100,26 +89,31 @@ defmodule ExMCP.Transport.Stdio do
         end
       end
 
-    try do
-      port = Port.open({:spawn_executable, to_charlist(executable_path)}, port_opts)
+    process_opts = [
+      cd: Keyword.get(opts, :cd, File.cwd!()),
+      env: safe_env(opts),
+      inherit_environment: Keyword.get(opts, :environment_policy, :isolated) == :inherit
+    ]
 
-      state = %__MODULE__{
-        port: port,
-        os_pid: port_os_pid(port),
-        line_buffer: "",
-        max_frame_bytes:
-          Options.positive_integer(opts, :max_frame_bytes, @default_max_frame_bytes)
-      }
+    case OwnedProcess.open(executable_path, tl(command), process_opts) do
+      {:ok, process} ->
+        state = %__MODULE__{
+          port: process,
+          os_pid: process.os_pid,
+          line_buffer: "",
+          max_frame_bytes:
+            Options.positive_integer(opts, :max_frame_bytes, @default_max_frame_bytes)
+        }
 
-      :telemetry.execute([:ex_mcp, :transport, :connection, :opened], %{}, %{
-        transport: :stdio,
-        command_basename: Path.basename(executable_path),
-        command_hash: LogSummary.fingerprint(executable_path)
-      })
+        :telemetry.execute([:ex_mcp, :transport, :connection, :opened], %{}, %{
+          transport: :stdio,
+          command_basename: Path.basename(executable_path),
+          command_hash: LogSummary.fingerprint(executable_path)
+        })
 
-      {:ok, state}
-    catch
-      :error, reason ->
+        {:ok, state}
+
+      {:error, reason} ->
         Error.connection_error({:spawn_failed, reason})
     end
   end
@@ -146,12 +140,9 @@ defmodule ExMCP.Transport.Stdio do
           transport: :stdio
         })
 
-        try do
-          Port.command(port, data)
-          {:ok, state}
-        catch
-          :error, reason ->
-            Error.transport_error({:send_failed, reason})
+        case OwnedProcess.command(port, data) do
+          :ok -> {:ok, state}
+          {:error, reason} -> Error.transport_error({:send_failed, reason})
         end
 
       {:error, security_error} ->
@@ -348,23 +339,20 @@ defmodule ExMCP.Transport.Stdio do
   @spec receive_message(%__MODULE__{}, timeout()) ::
           {:ok, binary(), %__MODULE__{}} | {:error, any()}
   def receive_message(%__MODULE__{port: port} = state, timeout) do
-    # Transfer port ownership to this process if needed
-    if Port.info(port, :connected) != {:connected, self()} do
-      Port.connect(port, self())
+    case OwnedProcess.transfer(port, self()) do
+      :ok -> receive_loop(state, timeout)
+      {:error, :closed} -> Error.connection_error(:closed)
     end
-
-    receive_loop(state, timeout)
   end
 
   @impl true
-  def close(%__MODULE__{port: port, os_pid: os_pid, reader_pid: reader_pid}) do
+  def close(%__MODULE__{port: port, reader_pid: reader_pid}) do
     :telemetry.execute([:ex_mcp, :transport, :connection, :closed], %{}, %{transport: :stdio})
 
-    # Close the port before killing the reader: port_close exits the port
-    # with reason :normal, which linked processes ignore, whereas killing
-    # the port's owner (the reader, in push mode) first would cascade a
-    # :killed exit through the port to its other linked processes.
-    close_port(port)
+    # The owned-process boundary confirms the isolated OS process group has
+    # stopped before close returns. Output may still be delivered to a push
+    # reader while shutdown drains, so stop the reader only afterwards.
+    OwnedProcess.close(port)
 
     if is_pid(reader_pid) and Process.alive?(reader_pid) do
       # The reader is a plain spawn_link receive loop that does not trap
@@ -375,84 +363,12 @@ defmodule ExMCP.Transport.Stdio do
       Process.exit(reader_pid, :kill)
     end
 
-    # Port.close/1 tears down the Erlang port, but on Unix it does not
-    # guarantee that the spawned OS process exits. Explicitly terminate the
-    # child after detaching the reader so repeated stdio connections cannot
-    # leak servers and exhaust the runner's process/thread budget.
-    terminate_os_process(os_pid)
-
     :ok
-  end
-
-  # Tolerate a port that is nil or already closed (e.g. the spawned process
-  # exited on its own before close/1 was called).
-  defp close_port(port) do
-    Port.close(port)
-    :ok
-  catch
-    :error, :badarg -> :ok
-  end
-
-  defp port_os_pid(port) do
-    case Port.info(port, :os_pid) do
-      {:os_pid, os_pid} -> os_pid
-      _other -> nil
-    end
-  end
-
-  defp terminate_os_process(nil), do: :ok
-
-  defp terminate_os_process(os_pid) when is_integer(os_pid) do
-    case :os.type() do
-      {:win32, _name} ->
-        run_command("taskkill", ["/PID", Integer.to_string(os_pid), "/T", "/F"])
-
-      {:unix, _name} ->
-        signal_process(os_pid, "TERM")
-
-        unless wait_for_process_exit(os_pid, @termination_grace_attempts) do
-          signal_process(os_pid, "KILL")
-        end
-    end
-
-    :ok
-  end
-
-  defp wait_for_process_exit(_os_pid, 0), do: false
-
-  defp wait_for_process_exit(os_pid, attempts_left) do
-    if os_process_alive?(os_pid) do
-      Process.sleep(@termination_poll_ms)
-      wait_for_process_exit(os_pid, attempts_left - 1)
-    else
-      true
-    end
-  end
-
-  defp os_process_alive?(os_pid) do
-    case run_command("kill", ["-0", Integer.to_string(os_pid)]) do
-      {_output, 0} -> true
-      _other -> false
-    end
-  end
-
-  defp signal_process(os_pid, signal) do
-    run_command("kill", ["-#{signal}", Integer.to_string(os_pid)])
-    :ok
-  end
-
-  defp run_command(command, args) do
-    case System.find_executable(command) do
-      nil -> {"", 127}
-      executable -> System.cmd(executable, args, stderr_to_stdout: true)
-    end
-  rescue
-    _error -> {"", 1}
   end
 
   @impl true
   def connected?(%__MODULE__{port: port}) do
-    Port.info(port) != nil
+    OwnedProcess.alive?(port)
   end
 
   @doc """
@@ -474,12 +390,12 @@ defmodule ExMCP.Transport.Stdio do
         end
       end)
 
-    try do
-      Port.connect(port, reader)
-      send(reader, :port_transferred)
-      {:ok, %{state | subscriber: pid, reader_pid: reader}}
-    rescue
-      ArgumentError ->
+    case OwnedProcess.transfer(port, reader) do
+      :ok ->
+        send(reader, :port_transferred)
+        {:ok, %{state | subscriber: pid, reader_pid: reader}}
+
+      {:error, :closed} ->
         Process.unlink(reader)
         Process.exit(reader, :kill)
         {:error, :port_closed}
@@ -591,7 +507,7 @@ defmodule ExMCP.Transport.Stdio do
 
           {:error, :frame_too_large} ->
             Kernel.send(subscriber, {:transport_closed, :frame_too_large})
-            close_port(port)
+            OwnedProcess.close(port)
         end
 
       {^port, {:exit_status, status}} ->

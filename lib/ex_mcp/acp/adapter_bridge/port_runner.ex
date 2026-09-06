@@ -1,7 +1,7 @@
 defmodule ExMCP.ACP.AdapterBridge.PortRunner do
   @moduledoc false
 
-  alias ExMCP.Internal.PortEnvironment
+  alias ExMCP.Internal.{OwnedProcess, PortEnvironment}
 
   @session_vars_to_clear ~w(
     CLAUDE_CODE_ENTRYPOINT CLAUDE_SESSION_ID CLAUDE_CONFIG_DIR
@@ -10,7 +10,7 @@ defmodule ExMCP.ACP.AdapterBridge.PortRunner do
   )
 
   @spec open(String.t(), [String.t()], keyword(), module()) ::
-          {:ok, port()} | {:error, term()}
+          {:ok, OwnedProcess.t()} | {:error, term()}
   def open(cmd, args, opts, adapter_mod) do
     with :ok <- PortEnvironment.validate_policy(opts),
          executable when is_binary(executable) <- System.find_executable(cmd) do
@@ -24,41 +24,18 @@ defmodule ExMCP.ACP.AdapterBridge.PortRunner do
   defp do_open(executable, args, opts, adapter_mod) do
     cwd = Keyword.get(opts, :cwd, File.cwd!())
 
-    port_opts = [
-      :binary,
-      :exit_status,
-      :use_stdio,
-      :stderr_to_stdout,
-      args: Enum.map(args, &to_charlist/1),
-      cd: to_charlist(cwd),
-      env: safe_env(opts, adapter_mod)
-    ]
-
-    try do
-      port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
-      {:ok, port}
-    catch
-      :error, reason -> {:error, {:port_open_failed, reason}}
-    end
+    OwnedProcess.open(executable, args,
+      cd: cwd,
+      env: safe_env(opts, adapter_mod),
+      inherit_environment: Keyword.get(opts, :environment_policy, :isolated) == :inherit
+    )
   end
 
-  @spec command(port(), iodata()) :: :ok | {:error, term()}
-  def command(port, data) do
-    Port.command(port, data)
-    :ok
-  catch
-    :error, reason -> {:error, reason}
-  end
+  @spec command(OwnedProcess.t(), iodata()) :: :ok | {:error, term()}
+  def command(process, data), do: OwnedProcess.command(process, data)
 
-  @spec close(port() | nil) :: :ok
-  def close(nil), do: :ok
-
-  def close(port) do
-    Port.close(port)
-    :ok
-  catch
-    :error, _ -> :ok
-  end
+  @spec close(OwnedProcess.t() | nil) :: :ok | {:error, term()}
+  def close(process), do: OwnedProcess.close(process)
 
   @spec safe_env(keyword(), module()) :: [{charlist(), charlist() | false}]
   def safe_env(opts, adapter_mod) do

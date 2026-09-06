@@ -708,7 +708,7 @@ defmodule ExMCP.Transport.HTTP do
     }
 
     # Get transport-specific security configuration
-    config = SecurityConfig.get_transport_config(:http)
+    config = SecurityConfig.get_transport_config(:http, request_security_config(state))
 
     case SecurityGuard.validate_request(security_request, config) do
       {:ok, sanitized_request} ->
@@ -718,6 +718,12 @@ defmodule ExMCP.Transport.HTTP do
         {:error, security_error}
     end
   end
+
+  defp request_security_config(%{security: security}) when is_map(security) do
+    Map.take(security, [:trusted_origins, :trusted_hosts, :additional_sensitive_headers])
+  end
+
+  defp request_security_config(_state), do: %{}
 
   defp make_http_request(url, headers, body, state) do
     transport_opts =

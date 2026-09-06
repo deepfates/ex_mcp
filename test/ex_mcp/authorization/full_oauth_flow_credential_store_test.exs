@@ -128,6 +128,46 @@ defmodule ExMCP.Authorization.FullOAuthFlowCredentialStoreTest do
              |> FullOAuthFlow.execute()
   end
 
+  test "an application can own the browser redirect and complete the exact PKCE transaction" do
+    {:ok, store_agent} =
+      Agent.start_link(fn -> %{index: %{}, registrations: %{}, tokens: %{}} end)
+
+    server = oauth_server("browser-client", nil, grant_types: ["authorization_code"])
+    redirect_uri = "http://127.0.0.1:4000/mcp/oauth/callback"
+
+    config =
+      server
+      |> flow_config({StoreAdapter, store_agent})
+      |> Map.merge(%{
+        client_registration: {:pre_registered, "browser-client", "browser-secret"},
+        credential_issuer: server.issuer,
+        redirect_uri: redirect_uri
+      })
+
+    assert {:ok, pending} = FullOAuthFlow.begin(config)
+    assert pending.redirect_uri == redirect_uri
+    assert pending.authorization_url =~ server.actual_origin <> "/authorize?"
+
+    query = pending.authorization_url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+    assert query["client_id"] == "browser-client"
+    assert query["redirect_uri"] == redirect_uri
+    assert is_binary(query["state"])
+    assert is_binary(query["code_challenge"])
+
+    refute inspect(pending) =~ query["state"]
+    refute inspect(pending) =~ "browser-secret"
+
+    callback = %{"code" => "browser-code", "state" => query["state"]}
+
+    assert {:ok, %{access_token: "token-for-browser-client"}} =
+             FullOAuthFlow.complete(pending, callback)
+
+    assert {:error, :authorization_transaction_replayed} =
+             FullOAuthFlow.complete(pending, callback)
+
+    assert Agent.get(store_agent, fn state -> map_size(state.tokens) end) == 1
+  end
+
   test "preserves native and web DCR redirect rejections without a weakening retry" do
     {:ok, store_agent} =
       Agent.start_link(fn -> %{index: %{}, registrations: %{}, tokens: %{}} end)
@@ -292,7 +332,7 @@ defmodule ExMCP.Authorization.FullOAuthFlowCredentialStoreTest do
               "authorization_endpoint" => actual_origin <> "/authorize",
               "token_endpoint" => actual_origin <> "/token",
               "registration_endpoint" => actual_origin <> "/register",
-              "grant_types_supported" => ["client_credentials"],
+              "grant_types_supported" => opts[:grant_types] || ["client_credentials"],
               "token_endpoint_auth_methods_supported" => ["client_secret_post"]
             }
 

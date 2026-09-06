@@ -9,11 +9,13 @@ defmodule ExMCP.ACP.Adapters.Codex.Config do
   @mode_profiles %{
     "read-only" => %{
       approval: "on-request",
+      approvals_reviewer: "user",
       sandbox: "read-only",
       sandbox_policy: %{"type" => "readOnly", "networkAccess" => false}
     },
     "agent" => %{
       approval: "on-request",
+      approvals_reviewer: "user",
       sandbox: "workspace-write",
       sandbox_policy: %{
         "type" => "workspaceWrite",
@@ -25,6 +27,7 @@ defmodule ExMCP.ACP.Adapters.Codex.Config do
     },
     "agent-full-access" => %{
       approval: "never",
+      approvals_reviewer: "user",
       sandbox: "danger-full-access",
       sandbox_policy: %{"type" => "dangerFullAccess"}
     }
@@ -94,10 +97,11 @@ defmodule ExMCP.ACP.Adapters.Codex.Config do
       nil ->
         map
 
-      %{sandbox: sandbox, approval: approval} ->
+      %{sandbox: sandbox, approval: approval, approvals_reviewer: approvals_reviewer} ->
         map
         |> Map.put("sandbox", sandbox)
         |> Map.put("approvalPolicy", approval)
+        |> Map.put("approvalsReviewer", approvals_reviewer)
     end
   end
 
@@ -111,10 +115,15 @@ defmodule ExMCP.ACP.Adapters.Codex.Config do
       nil ->
         map
 
-      %{sandbox_policy: sandbox_policy, approval: approval} ->
+      %{
+        sandbox_policy: sandbox_policy,
+        approval: approval,
+        approvals_reviewer: approvals_reviewer
+      } ->
         map
         |> Map.put("sandboxPolicy", add_writable_roots(sandbox_policy, additional_directories))
         |> Map.put("approvalPolicy", approval)
+        |> Map.put("approvalsReviewer", approvals_reviewer)
     end
   end
 

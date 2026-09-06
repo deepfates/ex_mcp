@@ -45,8 +45,10 @@ defmodule ExMCP.Authorization.FullOAuthFlow do
     OAuthFlow,
     OAuthTransactionStore,
     OIDCDiscovery,
+    PendingAuthorization,
     RegistrationPolicy,
-    SecureHTTP
+    SecureHTTP,
+    Validator
   }
 
   alias ExMCP.Internal.LogSummary
@@ -62,6 +64,7 @@ defmodule ExMCP.Authorization.FullOAuthFlow do
           optional(:client_metadata_url) => String.t(),
           optional(:application_type) => RegistrationPolicy.application_type(),
           optional(:redirect_port) => non_neg_integer(),
+          optional(:redirect_uri) => String.t(),
           optional(:private_key) => JOSE.JWK.t(),
           optional(:signing_algorithm) => String.t(),
           optional(:key_id) => String.t(),
@@ -134,6 +137,127 @@ defmodule ExMCP.Authorization.FullOAuthFlow do
 
         err
     end
+  end
+
+  @doc """
+  Begins an application-owned authorization-code flow.
+
+  This performs MCP protected-resource discovery, authorization-server
+  discovery, client registration selection, and PKCE transaction creation, but
+  does not open or follow the authorization URL. The caller owns presenting
+  `pending.authorization_url` in its browser or native UI and must keep the
+  returned pending transaction server-side.
+
+  Pass the exact callback parameters and pending value to `complete/2`. Use
+  `cancel/1` when the user abandons the flow.
+  """
+  @spec begin(config()) :: {:ok, PendingAuthorization.t()} | {:error, term()}
+  def begin(config) when is_map(config) do
+    resource_hash = LogSummary.fingerprint(config[:resource_url])
+
+    :telemetry.execute(
+      [:ex_mcp, :auth, :flow, :started],
+      %{system_time: System.system_time()},
+      %{resource_hash: resource_hash}
+    )
+
+    result =
+      with {:ok, prm} <- discover_resource_metadata(config),
+           :ok <- validate_prm_resource(prm, config),
+           {:ok, as_metadata} <- discover_as_metadata(prm, config),
+           {:ok, client_info} <- ensure_client_registered(as_metadata, config) do
+        prepare_application_authorization(prm, as_metadata, client_info, config)
+      end
+
+    case result do
+      {:ok, _pending} = ok ->
+        ok
+
+      {:error, reason} = error ->
+        :telemetry.execute(
+          [:ex_mcp, :auth, :flow, :failed],
+          %{system_time: System.system_time()},
+          %{resource_hash: resource_hash, reason: LogSummary.describe(reason)}
+        )
+
+        error
+    end
+  end
+
+  @doc """
+  Completes an application-owned authorization-code flow.
+
+  Callback state and issuer are validated atomically, the authorization code is
+  redeemed exactly once, and the resulting issuer-bound token is persisted
+  through the configured credential store when present.
+  """
+  @spec complete(PendingAuthorization.t(), map()) :: {:ok, map()} | {:error, term()}
+  def complete(%PendingAuthorization{} = pending, callback_params)
+      when is_map(callback_params) do
+    result =
+      with {:ok, code} <-
+             OAuthFlow.validate_authorization_response(callback_params, pending.transaction),
+           {:ok, body} <-
+             authorization_code_token_body(
+               code,
+               pending.transaction,
+               pending.client_info,
+               pending.redirect_uri,
+               pending.token_endpoint,
+               pending.config,
+               pending.token_auth_method
+             ),
+           :ok <-
+             OAuthTransactionStore.redeem_code(
+               pending.transaction.transaction_id,
+               code,
+               pending.redirect_uri
+             ),
+           {:ok, token_data} <-
+             HTTPClient.make_token_request(
+               pending.token_endpoint,
+               body,
+               auth_method: pending.token_auth_method
+             ),
+           :ok <-
+             persist_token(
+               token_data,
+               pending.authorization_server,
+               pending.client_info,
+               pending.config
+             ) do
+        :telemetry.execute(
+          [:ex_mcp, :auth, :token, :obtained],
+          %{system_time: System.system_time()},
+          %{token_type: token_field(token_data, :token_type)}
+        )
+
+        :telemetry.execute(
+          [:ex_mcp, :auth, :flow, :completed],
+          %{system_time: System.system_time()},
+          %{resource_hash: LogSummary.fingerprint(pending.config[:resource_url])}
+        )
+
+        {:ok,
+         Map.put(
+           token_data,
+           :authorization_server_issuer,
+           pending.authorization_server["issuer"]
+         )}
+      end
+
+    OAuthTransactionStore.abort(pending.transaction.transaction_id)
+    result
+  end
+
+  def complete(%PendingAuthorization{}, _callback_params),
+    do: {:error, :invalid_authorization_callback}
+
+  @doc "Cancels an application-owned authorization-code transaction."
+  @spec cancel(PendingAuthorization.t()) :: :ok
+  def cancel(%PendingAuthorization{} = pending) do
+    OAuthTransactionStore.abort(pending.transaction.transaction_id)
+    :ok
   end
 
   # Step 1: Discover which AS protects the resource
@@ -481,7 +605,7 @@ defmodule ExMCP.Authorization.FullOAuthFlow do
       registration_endpoint_hash: LogSummary.fingerprint(registration_endpoint)
     )
 
-    redirect_uri = "http://127.0.0.1:#{config.redirect_port}/callback"
+    redirect_uri = registration_redirect_uri(config)
     supported = as_metadata["token_endpoint_auth_methods_supported"] || []
     auth_method = select_registration_auth_method(supported)
 
@@ -546,6 +670,13 @@ defmodule ExMCP.Authorization.FullOAuthFlow do
       true -> "none"
     end
   end
+
+  defp registration_redirect_uri(%{redirect_uri: redirect_uri})
+       when is_binary(redirect_uri) and redirect_uri != "",
+       do: redirect_uri
+
+  defp registration_redirect_uri(config),
+    do: "http://127.0.0.1:#{config.redirect_port}/callback"
 
   defp load_persisted_registration(as_metadata, %{credential_store: store} = config) do
     CredentialStore.fetch_registration(
@@ -753,6 +884,53 @@ defmodule ExMCP.Authorization.FullOAuthFlow do
 
     {:ok, body}
   end
+
+  defp prepare_application_authorization(prm, as_metadata, client_info, config) do
+    authorization_endpoint = as_metadata["authorization_endpoint"]
+    token_endpoint = as_metadata["token_endpoint"]
+    redirect_uri = config[:redirect_uri]
+    grant_types = as_metadata["grant_types_supported"] || []
+
+    supported_methods =
+      as_metadata["token_endpoint_auth_methods_supported"] || ["client_secret_post"]
+
+    config =
+      case prm[:scopes_supported] do
+        scopes when is_list(scopes) and scopes != [] -> Map.put_new(config, :prm_scopes, scopes)
+        _missing -> config
+      end
+
+    with :ok <- authorization_code_supported(grant_types),
+         :ok <- validate_endpoints(authorization_endpoint, token_endpoint),
+         :ok <- Validator.validate_redirect_uri(redirect_uri),
+         {:ok, token_auth_method} <-
+           select_token_auth_method(supported_methods, client_info, config),
+         {:ok, authorization_url, transaction} <-
+           start_flow(client_info, redirect_uri, as_metadata, config) do
+      {:ok,
+       %PendingAuthorization{
+         authorization_url: authorization_url,
+         transaction: transaction,
+         client_info: client_info,
+         authorization_server: as_metadata,
+         token_endpoint: token_endpoint,
+         token_auth_method: token_auth_method,
+         redirect_uri: redirect_uri,
+         config: config
+       }}
+    end
+  end
+
+  defp authorization_code_supported([]), do: :ok
+
+  defp authorization_code_supported(grant_types) when is_list(grant_types) do
+    if "authorization_code" in grant_types,
+      do: :ok,
+      else: {:error, :authorization_code_grant_not_supported}
+  end
+
+  defp authorization_code_supported(_invalid),
+    do: {:error, :invalid_authorization_server_grant_types}
 
   # Step 4b: Run authorization code flow with PKCE
   defp run_auth_code_flow(as_metadata, client_info, config) do

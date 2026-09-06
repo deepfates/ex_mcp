@@ -64,6 +64,7 @@ defmodule ExMCP.ACP.Client do
   @default_handler_request_timeout 30_000
   @default_max_update_queue 32
   @default_max_update_queue_bytes 8_388_608
+  @max_handler_error_message_bytes 1_024
   @supported_protocol_versions [1]
 
   defstruct [
@@ -88,6 +89,7 @@ defmodule ExMCP.ACP.Client do
     pending_requests: %{},
     pending_caller_monitors: %{},
     pending_agent_requests: %{},
+    event_listener_drops: %{},
     sessions: %{},
     # Accumulates streamed agent_message_chunk text per session so a synchronous
     # prompt/3 can return it — agents that stream the answer via session/update
@@ -204,6 +206,29 @@ defmodule ExMCP.ACP.Client do
     GenServer.call(client, {:prompt, session_id, content}, timeout)
   end
 
+  @doc """
+  Places an ordered barrier after session updates already offered to the event listener.
+
+  The configured listener receives
+  `{:acp_event_listener_barrier, client, ref, session_id, metadata}`. Messages
+  from the client process are ordered, so processing that barrier proves the
+  listener has already processed every preceding delivered update. The
+  metadata includes `:dropped_updates`; a non-zero value means the bounded
+  listener queue rejected updates since the previous barrier and a durable
+  projection must not claim a complete turn.
+
+  This does not wait for the listener to process the barrier. The returned
+  reference lets an application correlate it with its own request lifecycle.
+  """
+  @spec event_listener_barrier(GenServer.server(), String.t(), reference()) ::
+          {:ok, reference()} | {:error, :event_listener_unavailable}
+  def event_listener_barrier(client, session_id, ref \\ make_ref())
+
+  def event_listener_barrier(client, session_id, ref)
+      when is_binary(session_id) and is_reference(ref) do
+    GenServer.call(client, {:event_listener_barrier, session_id, ref})
+  end
+
   @doc "Lists available sessions from the agent. Stabilized in ACP spec March 9, 2026."
   @spec list_sessions(GenServer.server(), keyword()) :: {:ok, map()} | {:error, any()}
   def list_sessions(client, opts \\ []) do
@@ -262,6 +287,12 @@ defmodule ExMCP.ACP.Client do
   @spec agent_capabilities(GenServer.server()) :: {:ok, map() | nil}
   def agent_capabilities(client) do
     GenServer.call(client, :agent_capabilities)
+  end
+
+  @doc "Returns the negotiated initialize handshake as a stable connection snapshot."
+  @spec connection_info(GenServer.server()) :: {:ok, map()}
+  def connection_info(client) do
+    GenServer.call(client, :connection_info)
   end
 
   @doc "Returns the agent's authentication methods from the initialize handshake."
@@ -505,12 +536,42 @@ defmodule ExMCP.ACP.Client do
     {:reply, {:ok, state.agent_capabilities}, state}
   end
 
+  def handle_call(:connection_info, _from, state) do
+    info = %{
+      "protocolVersion" => state.protocol_version,
+      "agentInfo" => state.agent_info,
+      "agentCapabilities" => state.agent_capabilities,
+      "authMethods" => state.auth_methods || [],
+      "clientCapabilities" => state.client_capabilities,
+      "status" => state.status
+    }
+
+    {:reply, {:ok, info}, state}
+  end
+
   def handle_call(:auth_methods, _from, state) do
     {:reply, {:ok, state.auth_methods || []}, state}
   end
 
   def handle_call(:status, _from, state) do
     {:reply, state.status, state}
+  end
+
+  def handle_call({:event_listener_barrier, session_id, ref}, _from, state) do
+    if is_pid(state.event_listener) and Process.alive?(state.event_listener) do
+      dropped_updates = Map.get(state.event_listener_drops, session_id, 0)
+
+      send(
+        state.event_listener,
+        {:acp_event_listener_barrier, self(), ref, session_id,
+         %{dropped_updates: dropped_updates}}
+      )
+
+      {:reply, {:ok, ref},
+       %{state | event_listener_drops: Map.delete(state.event_listener_drops, session_id)}}
+    else
+      {:reply, {:error, :event_listener_unavailable}, state}
+    end
   end
 
   def handle_call({:close_session, session_id}, from, %{status: :ready} = state) do
@@ -631,6 +692,7 @@ defmodule ExMCP.ACP.Client do
         {:noreply, state}
 
       {request, pending} ->
+        cancel_handler_request(state, ref)
         response = Protocol.encode_error(-32603, "Client handler timed out", nil, request.id)
         send_to_transport(response, state)
         {:noreply, %{state | pending_agent_requests: pending}}
@@ -905,6 +967,12 @@ defmodule ExMCP.ACP.Client do
 
         {:transport_message, raw} ->
           handle_init_frame(raw, request_id, deadline, max_frame_bytes)
+
+        {:transport_closed, _reason} ->
+          {:error, :transport_closed}
+
+        {:transport_error, reason} ->
+          {:error, {:transport_error, reason}}
       after
         remaining ->
           {:error, :init_timeout}
@@ -922,6 +990,9 @@ defmodule ExMCP.ACP.Client do
 
         {:error, error, ^request_id} ->
           {:error, {:agent_error, error}}
+
+        {:request, _method, _params, _id} ->
+          {:error, :invalid_initialize_response}
 
         _other ->
           # Skip non-matching messages during init without resetting the deadline.
@@ -1249,8 +1320,9 @@ defmodule ExMCP.ACP.Client do
       end
     end
 
-    Enum.each(state.pending_agent_requests, fn {_ref, request} ->
+    Enum.each(state.pending_agent_requests, fn {ref, request} ->
       cancel_timer(Map.get(request, :timer_ref))
+      cancel_handler_request(state, ref)
     end)
 
     %{
@@ -1273,16 +1345,25 @@ defmodule ExMCP.ACP.Client do
 
     # Notify event listener from the client process so a slow handler cannot
     # stall the update stream.
-    if is_pid(state.event_listener) and
-         update_mailbox_below_limits?(
-           state.event_listener,
-           state.max_update_queue,
-           state.max_update_queue_bytes,
-           update_bytes,
-           :listener
-         ) do
-      send(state.event_listener, {:acp_session_update, session_id, update})
-    end
+    state =
+      if is_pid(state.event_listener) do
+        if update_mailbox_below_limits?(
+             state.event_listener,
+             state.max_update_queue,
+             state.max_update_queue_bytes,
+             update_bytes,
+             :listener
+           ) do
+          send(state.event_listener, {:acp_session_update, session_id, update})
+          state
+        else
+          update_in(state.event_listener_drops, fn drops ->
+            Map.update(drops, session_id, 1, &(&1 + 1))
+          end)
+        end
+      else
+        state
+      end
 
     if state.handler_pid do
       HandlerRunner.session_update(
@@ -1664,6 +1745,18 @@ defmodule ExMCP.ACP.Client do
     Protocol.encode_response(result, id)
   end
 
+  defp encode_handler_response(%{id: id}, {_kind, {:error, reason}})
+       when is_binary(reason) do
+    Logger.warning("ACP client handler denied or failed a request")
+
+    Protocol.encode_error(
+      -32603,
+      valid_utf8_prefix(reason, @max_handler_error_message_bytes),
+      nil,
+      id
+    )
+  end
+
   defp encode_handler_response(%{id: id}, {_kind, {:error, reason}}) do
     Logger.warning("ACP client handler failed", reason: safe_error_class(reason))
     Protocol.encode_error(-32603, "Client handler failed", nil, id)
@@ -1702,8 +1795,9 @@ defmodule ExMCP.ACP.Client do
         request.kind in [:permission, :elicitation] and request.session_id == session_id
       end)
 
-    Enum.each(to_cancel, fn {_ref, request} ->
+    Enum.each(to_cancel, fn {ref, request} ->
       cancel_timer(request.timer_ref)
+      cancel_handler_request(state, ref)
 
       response =
         case request.kind do
@@ -1726,8 +1820,9 @@ defmodule ExMCP.ACP.Client do
         request.id == request_id
       end)
 
-    Enum.each(to_cancel, fn {_ref, request} ->
+    Enum.each(to_cancel, fn {ref, request} ->
       cancel_timer(request.timer_ref)
+      cancel_handler_request(state, ref)
       response = Protocol.encode_request_cancelled_error(request.id)
       send_to_transport(response, state)
     end)
@@ -1736,6 +1831,12 @@ defmodule ExMCP.ACP.Client do
   end
 
   defp handle_cancel_request_notification(_params, state), do: state
+
+  defp cancel_handler_request(%{handler_pid: pid}, ref) when is_pid(pid) do
+    HandlerRunner.cancel_request(pid, ref)
+  end
+
+  defp cancel_handler_request(_state, _ref), do: :ok
 
   defp safe_error_class({kind, reason, _stack}) when kind in [:error, :exit, :throw],
     do: "#{kind}:#{inspect(error_module(reason))}"

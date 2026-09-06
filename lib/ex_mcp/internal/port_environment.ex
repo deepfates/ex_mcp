@@ -60,10 +60,47 @@ defmodule ExMCP.Internal.PortEnvironment do
       Map.filter(parent_env, fn {name, _value} ->
         name in @isolated_allowlist or String.starts_with?(name, "LC_")
       end)
+      |> sanitize_release_path(parent_env["RELEASE_ROOT"])
 
     parent_env
     |> Map.new(fn {name, _value} -> {name, false} end)
     |> Map.merge(retained)
+  end
+
+  # OTP releases prepend their private ERTS directories to PATH. Keeping those
+  # entries after removing RELEASE_* makes a child `mix` or `elixir` invocation
+  # resolve the release's `erl` executable and look for the parent's boot file.
+  # An isolated child must retain the host PATH, not the release runtime path.
+  defp sanitize_release_path(%{"PATH" => path} = env, release_root)
+       when is_binary(path) and is_binary(release_root) and release_root != "" do
+    release_root = Path.expand(release_root)
+
+    path =
+      path
+      |> String.split(path_separator())
+      |> Enum.reject(&release_path_entry?(&1, release_root))
+      |> Enum.join(path_separator())
+
+    Map.put(env, "PATH", path)
+  end
+
+  defp sanitize_release_path(env, _release_root), do: env
+
+  defp release_path_entry?("", _release_root), do: false
+
+  defp release_path_entry?(entry, release_root) do
+    expanded = Path.expand(entry)
+
+    Path.type(entry) == :absolute and
+      (expanded == release_root or String.starts_with?(expanded, release_root <> "/") or
+         String.starts_with?(expanded, release_root <> "\\"))
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _other -> ":"
+    end
   end
 
   defp normalize_value(false), do: false

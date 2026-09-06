@@ -73,7 +73,7 @@ defmodule ExMCP.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger, :crypto, :ssl, :inets],
+      extra_applications: [:logger, :crypto, :ssl, :inets, :erlexec],
       mod: {ExMCP.Application, []}
     ]
   end
@@ -86,6 +86,7 @@ defmodule ExMCP.MixProject do
       {:mint_web_socket, "~> 1.0"},
       {:castore, "~> 1.0"},
       {:telemetry, "~> 1.2"},
+      {:erlexec, "~> 2.0"},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

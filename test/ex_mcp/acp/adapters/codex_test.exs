@@ -177,6 +177,7 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       assert codex_msg["params"]["cwd"] == "/tmp/project"
       assert codex_msg["params"]["sandbox"] == "workspace-write"
       assert codex_msg["params"]["approvalPolicy"] == "on-request"
+      assert codex_msg["params"]["approvalsReviewer"] == "user"
 
       assert get_in(codex_msg, ["params", "config", "mcp_servers", "remote_tools", "url"]) ==
                "http://localhost:4000/mcp"
@@ -214,7 +215,7 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       assert codex_msg["method"] == "thread/resume"
       assert codex_msg["params"]["threadId"] == "thread-1"
       assert codex_msg["params"]["model"] == "gpt-5"
-      assert codex_msg["params"]["initialTurnsPage"]["itemsView"] == "full"
+      refute Map.has_key?(codex_msg["params"], "initialTurnsPage")
     end
 
     test "session/list sends thread/list", %{state: state} do
@@ -286,6 +287,7 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
 
       assert codex_msg["method"] == "turn/start"
       assert codex_msg["params"]["threadId"] == "thread-1"
+      assert codex_msg["params"]["approvalsReviewer"] == "user"
       assert Enum.at(codex_msg["params"]["input"], 1)["text"] == "[@lib.ex](file:///tmp/lib.ex)"
 
       assert Enum.at(codex_msg["params"]["input"], 2)["text"] =~
@@ -621,6 +623,47 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       }
     end
 
+    test "a sparse thread/started notification preserves negotiated session config", %{
+      state: state
+    } do
+      state =
+        put_test_session(state, "thread-1", %{
+          model: "gpt-5.6-sol",
+          model_id: "gpt-5.6-sol/medium",
+          reasoning_effort: "medium",
+          additional_directories: ["/tmp/shared"]
+        })
+
+      started =
+        Jason.encode!(%{
+          "method" => "thread/started",
+          "params" => %{"thread" => %{"id" => "thread-1", "cwd" => "/tmp/project"}}
+        })
+
+      assert {:skip, state} = Codex.translate_inbound(started, state)
+      session = state.sessions["thread-1"]
+      assert session.model == "gpt-5.6-sol"
+      assert session.reasoning_effort == "medium"
+      assert session.additional_directories == ["/tmp/shared"]
+
+      request = %{
+        "method" => "session/set_config_option",
+        "id" => 9,
+        "params" => %{
+          "sessionId" => "thread-1",
+          "configId" => "reasoning_effort",
+          "value" => "low"
+        }
+      }
+
+      assert {:reply, result, _state} = Codex.translate_outbound(request, state)
+
+      assert Enum.any?(
+               result["configOptions"],
+               &(&1["id"] == "model" && &1["currentValue"] == "gpt-5.6-sol")
+             )
+    end
+
     test "routes text deltas to the session from params", %{state: state} do
       line =
         Jason.encode!(%{
@@ -634,6 +677,47 @@ defmodule ExMCP.ACP.Adapters.CodexTest do
       assert msg["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
       assert new_state.sessions["thread-1"].accumulated_text == ["Hello "]
       assert new_state.sessions["thread-1"].prompt_activity
+    end
+
+    test "does not emit the completed snapshot after streaming the same agent message", %{
+      state: state
+    } do
+      delta =
+        Jason.encode!(%{
+          "method" => "item/agentMessage/delta",
+          "params" => %{
+            "delta" => "Hello",
+            "threadId" => "thread-1",
+            "itemId" => "message-1"
+          }
+        })
+
+      completed =
+        Jason.encode!(%{
+          "method" => "item/completed",
+          "params" => %{
+            "threadId" => "thread-1",
+            "item" => %{"id" => "message-1", "type" => "agentMessage", "text" => "Hello"}
+          }
+        })
+
+      assert {:messages, [_chunk], state} = Codex.translate_inbound(delta, state)
+      assert {:skip, state} = Codex.translate_inbound(completed, state)
+      assert state.sessions["thread-1"].streamed_agent_items == MapSet.new()
+    end
+
+    test "emits a completed agent message when no deltas were delivered", %{state: state} do
+      completed =
+        Jason.encode!(%{
+          "method" => "item/completed",
+          "params" => %{
+            "threadId" => "thread-1",
+            "item" => %{"id" => "message-1", "type" => "agentMessage", "text" => "Hello"}
+          }
+        })
+
+      assert {:messages, [message], _state} = Codex.translate_inbound(completed, state)
+      assert get_in(message, ["params", "update", "content", "text"]) == "Hello"
     end
 
     test "turn/completed responds to the active prompt for that session", %{state: state} do

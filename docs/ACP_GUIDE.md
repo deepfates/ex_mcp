@@ -299,6 +299,9 @@ ExMCP.ACP.Client.cancel(client, sid)
 # Cancel a specific JSON-RPC request when you have its request id
 ExMCP.ACP.Client.cancel_request(client, request_id)
 
+# Inspect the negotiated protocol, agent identity, and capabilities
+{:ok, info} = ExMCP.ACP.Client.connection_info(client)
+
 # Configure the agent at runtime
 ExMCP.ACP.Client.set_mode(client, sid, "high")
 ExMCP.ACP.Client.set_config_option(client, sid, "model", "anthropic/claude-sonnet-4")
@@ -403,6 +406,33 @@ defmodule MyApp.ACPHandler do
 end
 ```
 
+Callbacks are serialized so their handler state remains coherent. A callback
+that must wait on a person or an external process can release that serialization
+boundary explicitly:
+
+```elixir
+def handle_terminal_request("terminal/wait_for_exit", params, _id, state) do
+  terminal_id = params["terminalId"]
+
+  work = fn ->
+    case MyApp.Terminals.wait_for_exit(terminal_id) do
+      {:ok, exit_code} -> {:ok, %{"exitCode" => exit_code}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  {:async, work, state}
+end
+```
+
+ExMCP owns and monitors this work. It is killed if the peer sends
+`$/cancel_request`, the handler deadline expires, the connection closes, or the
+handler runner terminates. Other callbacks—including `terminal/kill`—continue
+to run against the serialized state while it waits. The zero-arity function
+returns the callback result without handler state; any state change must be made
+in the state returned with `{:async, work, state}`. The same explicit form is
+available for permission, file, and elicitation callbacks.
+
 The client records canonical workspace roots when a session is created, loaded,
 resumed, or forked. It rejects filesystem paths and terminal working directories
 outside those roots, including escapes through existing symlinks. Nonexistent
@@ -425,6 +455,30 @@ receive do
     IO.puts("#{type}: #{inspect(update)}")
 end
 ```
+
+The listener queue is deliberately bounded. A durable consumer that must order
+turn completion after every delivered update should place a barrier after the
+prompt response:
+
+```elixir
+{:ok, barrier_ref} =
+  ExMCP.ACP.Client.event_listener_barrier(client, session_id)
+
+receive do
+  {:acp_event_listener_barrier, ^client, ^barrier_ref, ^session_id,
+   %{dropped_updates: 0}} ->
+    :projection_is_current
+
+  {:acp_event_listener_barrier, ^client, ^barrier_ref, ^session_id,
+   %{dropped_updates: count}} ->
+    {:projection_incomplete, count}
+end
+```
+
+The barrier is sent by the same client process as the update messages, so BEAM
+mailbox ordering makes it an ordered cut through delivered updates. It does not
+turn the bounded listener into an unbounded queue: any rejected update is
+reported in the barrier metadata and must be handled explicitly.
 
 ## Session Update Types
 
@@ -733,11 +787,18 @@ ACP agents can use MCP servers as tool providers. Pass MCP server configurations
 {:ok, %{"sessionId" => sid}} = ExMCP.ACP.Client.new_session(client, "/project",
   additional_directories: ["/shared/docs"],
   mcp_servers: [
-    ExMCP.ACP.Types.stdio_mcp_server("local-tools", "my_mcp_server", args: ["--stdio"]),
+    ExMCP.ACP.Types.stdio_mcp_server("local-tools", "/path/to/my_mcp_server",
+      args: ["--stdio"]
+    ),
     ExMCP.ACP.Types.http_mcp_server("remote-tools", "http://localhost:4000/mcp")
   ]
 )
 ```
+
+All ACP agents support stdio MCP descriptors. ExMCP sends HTTP or legacy SSE
+descriptors only when the initialized agent advertises the corresponding
+official `mcpCapabilities` flag; otherwise the lifecycle call fails locally
+with `{:unsupported_capability, :mcp_http}` or `:mcp_sse`.
 
 ## ACP Registry
 

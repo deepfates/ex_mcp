@@ -222,6 +222,71 @@ defmodule ExMCP.ACP.AdapterBridgeTest do
     refute output =~ "must-not-reach-child"
   end
 
+  @tag :unix
+  test "closing an adapter subprocess confirms its process group is gone" do
+    shell = System.find_executable("sh")
+
+    script = """
+    trap '' TERM
+    sleep 120 &
+    child=$!
+    printf '%s %s\\n' $$ "$child"
+    wait
+    """
+
+    assert {:ok, process} =
+             PortRunner.open(shell, ["-c", script], [], MockAdapter)
+
+    [leader_pid, child_pid] =
+      process
+      |> receive_first_line()
+      |> String.split()
+      |> Enum.map(&String.to_integer/1)
+
+    on_exit(fn ->
+      force_kill(leader_pid)
+      force_kill(child_pid)
+    end)
+
+    assert os_process_alive?(leader_pid)
+    assert os_process_alive?(child_pid)
+    assert :ok = PortRunner.close(process)
+    refute os_process_alive?(leader_pid)
+    refute os_process_alive?(child_pid)
+  end
+
+  @tag :unix
+  test "closing an adapter subprocess kills descendants that create their own process group" do
+    shell = System.find_executable("sh")
+
+    script = """
+    set -m
+    sleep 120 &
+    child=$!
+    printf '%s %s\\n' $$ "$child"
+    wait
+    """
+
+    assert {:ok, process} =
+             PortRunner.open(shell, ["-c", script], [], MockAdapter)
+
+    [leader_pid, child_pid] =
+      process
+      |> receive_first_line()
+      |> String.split()
+      |> Enum.map(&String.to_integer/1)
+
+    on_exit(fn ->
+      force_kill(leader_pid)
+      force_kill(child_pid)
+    end)
+
+    assert os_process_group(leader_pid) != os_process_group(child_pid)
+    assert :ok = PortRunner.close(process)
+    refute os_process_alive?(leader_pid)
+    refute os_process_alive?(child_pid)
+  end
+
   test "rejects ACP frames larger than the configured bridge limit" do
     {:ok, bridge} =
       AdapterBridge.start_link(
@@ -305,6 +370,42 @@ defmodule ExMCP.ACP.AdapterBridgeTest do
       10_000 ->
         flunk("timed out waiting for environment probe: #{output}")
     end
+  end
+
+  defp receive_first_line(process, buffer \\ "") do
+    receive do
+      {^process, {:data, data}} ->
+        buffer = buffer <> data
+
+        case String.split(buffer, "\n", parts: 2) do
+          [line, _rest] -> line
+          [_partial] -> receive_first_line(process, buffer)
+        end
+    after
+      5_000 -> flunk("timed out waiting for process tree probe: #{inspect(buffer)}")
+    end
+  end
+
+  defp os_process_alive?(pid) do
+    case System.cmd("/bin/kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      _other -> false
+    end
+  end
+
+  defp force_kill(pid) do
+    if os_process_alive?(pid) do
+      System.cmd("/bin/kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+    end
+
+    :ok
+  end
+
+  defp os_process_group(pid) do
+    {output, 0} =
+      System.cmd("/bin/ps", ["-o", "pgid=", "-p", Integer.to_string(pid)], stderr_to_stdout: true)
+
+    output |> String.trim() |> String.to_integer()
   end
 
   defmodule ParamListAdapter do

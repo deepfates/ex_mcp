@@ -10,6 +10,8 @@ defmodule ExMCP.ACP.Client.Handler do
   """
 
   @type state :: any()
+  @type async_work(result) :: (-> {:ok, result} | {:error, any()})
+  @type async_unit_work :: (-> :ok | {:error, any()})
 
   @doc "Called when the handler is initialized."
   @callback init(opts :: keyword()) :: {:ok, state()}
@@ -34,7 +36,10 @@ defmodule ExMCP.ACP.Client.Handler do
               tool_call :: map(),
               options :: [map()],
               state()
-            ) :: {:ok, outcome :: map(), state()}
+            ) ::
+              {:ok, outcome :: map(), state()}
+              | {:error, reason :: any(), state()}
+              | {:async, async_work(map()), state()}
 
   @doc """
   Called when the agent requests to read a file.
@@ -43,7 +48,9 @@ defmodule ExMCP.ACP.Client.Handler do
   `{:error, reason, state}` to deny access.
   """
   @callback handle_file_read(session_id :: String.t(), path :: String.t(), opts :: map(), state()) ::
-              {:ok, content :: String.t(), state()} | {:error, reason :: String.t(), state()}
+              {:ok, content :: String.t(), state()}
+              | {:error, reason :: String.t(), state()}
+              | {:async, async_work(String.t()), state()}
 
   @doc """
   Called when the agent requests to write a file.
@@ -56,7 +63,10 @@ defmodule ExMCP.ACP.Client.Handler do
               path :: String.t(),
               content :: String.t(),
               state()
-            ) :: {:ok, state()} | {:error, reason :: String.t(), state()}
+            ) ::
+              {:ok, state()}
+              | {:error, reason :: String.t(), state()}
+              | {:async, async_unit_work(), state()}
 
   @doc """
   Called when the agent requests a terminal operation.
@@ -64,21 +74,35 @@ defmodule ExMCP.ACP.Client.Handler do
   The `method` is one of the stable `terminal/*` methods and `params` is the
   raw ACP params map. Return `{:ok, result, state}` with the method-specific
   result map, or `{:error, reason, state}` to deny or fail the operation.
+
+  A long-lived operation such as `terminal/wait_for_exit` should return
+  `{:async, work, state}`. ExMCP runs the zero-arity `work` function outside the
+  serialized handler, monitors it, and cancels it if the peer sends
+  `$/cancel_request`, the request times out, or the client disconnects. The
+  function returns `{:ok, result}` or `{:error, reason}` and must not mutate
+  handler state; update state before returning the async tuple instead.
   """
   @callback handle_terminal_request(
               method :: String.t(),
               params :: map(),
               id :: integer() | String.t() | nil,
               state()
-            ) :: {:ok, result :: map(), state()} | {:error, reason :: String.t(), state()}
+            ) ::
+              {:ok, result :: map(), state()}
+              | {:error, reason :: String.t(), state()}
+              | {:async, async_work(map()), state()}
 
   @doc "Called when the agent requests a form-mode elicitation."
   @callback handle_form_elicitation(params :: map(), state()) ::
-              {:ok, response :: map(), state()} | {:error, reason :: term(), state()}
+              {:ok, response :: map(), state()}
+              | {:error, reason :: term(), state()}
+              | {:async, async_work(map()), state()}
 
   @doc "Called when the agent requests a URL-mode elicitation."
   @callback handle_url_elicitation(params :: map(), state()) ::
-              {:ok, response :: map(), state()} | {:error, reason :: term(), state()}
+              {:ok, response :: map(), state()}
+              | {:error, reason :: term(), state()}
+              | {:async, async_work(map()), state()}
 
   @doc "Called when an accepted URL elicitation completes out of band."
   @callback handle_elicitation_complete(elicitation_id :: String.t(), state()) :: {:ok, state()}

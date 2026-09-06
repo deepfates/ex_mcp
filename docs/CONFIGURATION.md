@@ -322,6 +322,44 @@ ExMCP does not accept caller-supplied state or reserved OAuth fields in
 `additional_params`. If a token request has an ambiguous outcome, its code
 remains redeemed; restart authorization instead of retrying the code.
 
+### Application-owned browser authorization
+
+Phoenix, LiveView, native, and other long-lived applications should own the
+user-facing redirect instead of asking ExMCP to open a loopback browser. The
+full OAuth flow exposes that lifecycle without weakening ExMCP's discovery,
+registration, PKCE, issuer, or replay protections:
+
+```elixir
+config = %{
+  resource_url: "https://mcp.example.com/mcp",
+  redirect_uri: "https://agent-home.example.com/mcp/oauth/callback",
+  client_registration: :auto,
+  application_type: :web,
+  scopes: [],
+  protocol_version: ExMCP.protocol_version()
+}
+
+{:ok, pending} = ExMCP.Authorization.FullOAuthFlow.begin(config)
+
+# Redirect the user's browser to pending.authorization_url. Keep `pending`
+# server-side, indexed by the library-generated state in pending.transaction.
+
+{:ok, token} =
+  ExMCP.Authorization.FullOAuthFlow.complete(pending, callback_params)
+```
+
+Call `FullOAuthFlow.cancel/1` if the application abandons the flow. The pending
+value contains PKCE material, client credentials, and state; never place it in
+a cookie, URL, durable event, or log. Its `Inspect` implementation redacts those
+fields, but the application is still responsible for server-side storage and
+for encrypting the returned access token, refresh token, and client secret.
+
+`complete/2` consumes the callback and code exactly once. A lost or ambiguous
+token response requires a new `begin/1`; it must not cause a code-exchange
+retry. Pending transactions use ExMCP's bounded node-local transaction store,
+so a distributed callback must route to the originating node or provide an
+equivalent strongly consistent owner.
+
 ## JSON Schema Resource Policy
 
 Every JSON Schema compiled or validated by ExMCP passes through one bounded,

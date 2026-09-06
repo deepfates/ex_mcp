@@ -38,10 +38,28 @@ defmodule ExMCP.ACP.LifecycleParamsTest do
                LifecycleParams.validate([additional_directories: ["relative"]], caps)
     end
 
-    test "accepts official MCP server descriptors without ExMCP metadata" do
+    test "gates optional official MCP transports on advertised capabilities" do
       opts = [mcp_servers: [%{"type" => "http", "name" => "docs", "url" => "http://localhost"}]]
 
-      assert :ok = LifecycleParams.validate(opts, %{})
+      assert {:error, {:unsupported_capability, :mcp_http}} =
+               LifecycleParams.validate(opts, %{})
+
+      assert :ok =
+               LifecycleParams.validate(opts, %{"mcpCapabilities" => %{"http" => true}})
+
+      sse_opts = [mcp_servers: [%{type: :sse, name: "events", url: "http://localhost/sse"}]]
+
+      assert {:error, {:unsupported_capability, :mcp_sse}} =
+               LifecycleParams.validate(sse_opts, %{})
+
+      assert :ok =
+               LifecycleParams.validate(sse_opts, %{mcpCapabilities: %{sse: true}})
+
+      assert :ok =
+               LifecycleParams.validate(
+                 [mcp_servers: [%{"name" => "local", "command" => "/bin/tool"}]],
+                 %{}
+               )
     end
 
     test "rejects removed native MCP descriptors" do

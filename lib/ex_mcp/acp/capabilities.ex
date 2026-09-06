@@ -71,6 +71,15 @@ defmodule ExMCP.ACP.Capabilities do
     end
   end
 
+  def supported?(caps, capability) when capability in [:mcp_http, :mcp_sse] do
+    key = if capability == :mcp_http, do: "http", else: "sse"
+
+    caps
+    |> Maps.get("mcpCapabilities")
+    |> Maps.get(key)
+    |> Maps.truthy?()
+  end
+
   def supported?(caps, capability) when is_map_key(@session_keys, capability) do
     key = Map.fetch!(@session_keys, capability)
 

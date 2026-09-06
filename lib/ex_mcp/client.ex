@@ -11,6 +11,8 @@ defmodule ExMCP.Client do
   - Automatic transport fallback via TransportManager
   - Automatic reconnection with exponential backoff after unexpected
     transport closure (see `start_link/1`)
+  - Caller-owned single requests with cooperative cancellation on caller exit
+    or timeout
   - Consistent return values with optional normalization
   - Convenience methods for common operations
   - Clean separation of concerns
@@ -106,7 +108,12 @@ defmodule ExMCP.Client do
     resource_subscriptions: %{desired: %{}, active: nil, generation: 0},
     # Monitor ref => compatibility subscriber. Dead callers are removed from
     # the desired resource set so their references cannot retain a stream.
-    resource_subscriber_monitors: %{}
+    resource_subscriber_monitors: %{},
+    # Monitor ref => request id for ordinary in-flight calls. A request is
+    # owned by the process blocked in GenServer.call/3; if that process dies,
+    # retire the request and send the transport's cooperative cancellation
+    # signal instead of retaining orphaned work.
+    pending_caller_monitors: %{}
   ]
 
   @type t :: GenServer.server()
@@ -859,6 +866,7 @@ defmodule ExMCP.Client do
     %__MODULE__{
       transport_opts: opts,
       pending_requests: %{},
+      pending_caller_monitors: %{},
       pending_batches: %{},
       cancelled_requests: MapSet.new(),
       health_check_interval: Keyword.get(opts, :health_check_interval, 30_000),
@@ -1118,6 +1126,7 @@ defmodule ExMCP.Client do
     notify_subscription_processes(state, {:client_subscription_shutdown, :client_disconnected})
     demonitor_subscriptions(state)
     demonitor_resource_subscribers(state)
+    demonitor_pending_callers(state)
 
     # Reply to all pending requests with connection error
     connection_error = Error.connection_error("Client disconnected")
@@ -1171,6 +1180,7 @@ defmodule ExMCP.Client do
       state
       | connection_status: :disconnected,
         pending_requests: %{},
+        pending_caller_monitors: %{},
         pending_batches: %{},
         cancelled_requests: MapSet.new(),
         receiver_task: nil,
@@ -1256,14 +1266,12 @@ defmodule ExMCP.Client do
       {from, :single, _method} ->
         # Reply with cancelled error and remove from pending
         GenServer.reply(from, {:error, :cancelled})
-        new_pending = Map.delete(state.pending_requests, request_id)
-        {:reply, :ok, %{updated_state | pending_requests: new_pending}}
+        {:reply, :ok, RequestHandler.drop_pending_request(request_id, updated_state)}
 
       {from, :single} ->
         # Reply with cancelled error and remove from pending
         GenServer.reply(from, {:error, :cancelled})
-        new_pending = Map.delete(state.pending_requests, request_id)
-        {:reply, :ok, %{updated_state | pending_requests: new_pending}}
+        {:reply, :ok, RequestHandler.drop_pending_request(request_id, updated_state)}
 
       _ ->
         # Other types of requests (batch, etc.) - just track as cancelled
@@ -1478,6 +1486,19 @@ defmodule ExMCP.Client do
     end
   end
 
+  # The process that owns an ordinary request exited before a response arrived.
+  # Retire the local request first, then make a best-effort protocol cancellation.
+  # This mirrors ExMCP.ACP.Client's caller-ownership contract.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, _reason},
+        %{pending_caller_monitors: monitors} = state
+      )
+      when is_map(monitors) and is_map_key(monitors, ref) do
+    request_id = Map.fetch!(monitors, ref)
+    state = RequestHandler.drop_pending_request(request_id, state)
+    {:noreply, cancel_request_transport(request_id, "Request caller exited", state)}
+  end
+
   # A server-request handler task (sampling/elicitation/custom) finished.
   def handle_info({:server_request_result, task_pid, outcome}, state)
       when is_pid(task_pid) do
@@ -1534,15 +1555,13 @@ defmodule ExMCP.Client do
     case Map.get(state.pending_requests, request_id) do
       {from, :single, _method} ->
         GenServer.reply(from, {:error, :timeout})
-
-        state = RequestHandler.close_request_stream(request_id, state)
-        {:noreply, %{state | pending_requests: Map.delete(state.pending_requests, request_id)}}
+        state = RequestHandler.drop_pending_request(request_id, state)
+        {:noreply, cancel_request_transport(request_id, "Request timed out", state)}
 
       {from, :single} ->
         GenServer.reply(from, {:error, :timeout})
-
-        state = RequestHandler.close_request_stream(request_id, state)
-        {:noreply, %{state | pending_requests: Map.delete(state.pending_requests, request_id)}}
+        state = RequestHandler.drop_pending_request(request_id, state)
+        {:noreply, cancel_request_transport(request_id, "Request timed out", state)}
 
       _ ->
         {:noreply, state}
@@ -1651,11 +1670,11 @@ defmodule ExMCP.Client do
     case request_id && Map.get(state.pending_requests, request_id) do
       {from, :single, _method} ->
         GenServer.reply(from, {:error, {:transport_error, reason}})
-        %{state | pending_requests: Map.delete(state.pending_requests, request_id)}
+        RequestHandler.drop_pending_request(request_id, state)
 
       {from, :single} ->
         GenServer.reply(from, {:error, {:transport_error, reason}})
-        %{state | pending_requests: Map.delete(state.pending_requests, request_id)}
+        RequestHandler.drop_pending_request(request_id, state)
 
       _ ->
         state
@@ -1675,6 +1694,7 @@ defmodule ExMCP.Client do
 
   defp handle_transport_down(reason, state) do
     reply_pending_with_close_error(reason, state)
+    demonitor_pending_callers(state)
     notify_subscription_processes(state, {:client_subscription_disconnected, reason})
 
     :telemetry.execute(
@@ -1702,6 +1722,7 @@ defmodule ExMCP.Client do
         transport_state: nil,
         receiver_task: nil,
         pending_requests: %{},
+        pending_caller_monitors: %{},
         pending_batches: %{},
         cancelled_requests: MapSet.new(),
         health_check_ref: nil,
@@ -1752,6 +1773,29 @@ defmodule ExMCP.Client do
         :ok
     end)
   end
+
+  defp cancel_request_transport(request_id, reason, state) do
+    case state do
+      %{transport_mod: HTTP, transport_state: %HTTP{protocol_era: :modern}} ->
+        RequestHandler.close_request_stream(request_id, state)
+
+      _other ->
+        case Protocol.encode_cancelled(request_id, reason) do
+          {:ok, %{"method" => method, "params" => params}} ->
+            {:noreply, state} = RequestHandler.handle_cast_notification(method, params, state)
+            state
+
+          {:error, :cannot_cancel_initialize} ->
+            state
+        end
+    end
+  end
+
+  defp demonitor_pending_callers(%{pending_caller_monitors: monitors}) when is_map(monitors) do
+    Enum.each(Map.keys(monitors), &Process.demonitor(&1, [:flush]))
+  end
+
+  defp demonitor_pending_callers(_state), do: :ok
 
   defp close_error_for(id, state, connection_error) do
     if MapSet.member?(state.cancelled_requests, id) do

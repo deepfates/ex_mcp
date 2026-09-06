@@ -17,7 +17,7 @@ defmodule ExMCP.Authorization.RegistrationPolicy do
   option.
   """
 
-  alias ExMCP.Authorization.{ClientIdMetadata, Issuer}
+  alias ExMCP.Authorization.{ClientIdMetadata, Issuer, Validator}
   alias ExMCP.Internal.VersionRegistry
 
   @type application_type :: :native | :web
@@ -155,7 +155,7 @@ defmodule ExMCP.Authorization.RegistrationPolicy do
 
   defp select_dynamic(registration_endpoint, config) do
     with {:ok, application_type} <- application_type(config),
-         :ok <- validate_redirect_port(config) do
+         :ok <- validate_redirect_target(config) do
       {:ok,
        {:dynamic,
         %{
@@ -173,11 +173,15 @@ defmodule ExMCP.Authorization.RegistrationPolicy do
 
   defp application_type(_config), do: {:error, :application_type_required}
 
-  defp validate_redirect_port(%{redirect_port: port})
+  defp validate_redirect_target(%{redirect_uri: redirect_uri})
+       when is_binary(redirect_uri) and redirect_uri != "",
+       do: Validator.validate_redirect_uri(redirect_uri)
+
+  defp validate_redirect_target(%{redirect_port: port})
        when is_integer(port) and port in 1..65_535,
        do: :ok
 
-  defp validate_redirect_port(_config), do: {:error, :redirect_port_required}
+  defp validate_redirect_target(_config), do: {:error, :redirect_port_required}
 
   defp resolve_secret(nil), do: {:ok, nil}
   defp resolve_secret(secret) when is_binary(secret), do: {:ok, secret}

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ExMCP.Transport.child_environment/1` exposes the built-in stdio isolation
+  policy to custom subprocess transports without requiring an internal-module
+  import.
+- `ExMCP.ACP.Client.connection_info/1` exposes the protocol version, agent
+  identity and capabilities, authentication methods, advertised client
+  capabilities, and status retained from initialization, so host applications
+  do not need to reconstruct or reach into client state.
 - A weekly advisory workflow now runs the complete MCP 2026-07-28 conformance
   suites against the newest published official harness while keeping release CI
   pinned to a reviewed version.
@@ -27,6 +34,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP session lifecycle requests now reject HTTP and legacy SSE MCP server
+  descriptors unless the agent advertised the corresponding official
+  `mcpCapabilities` flag. Stdio remains mandatory and does not require an
+  optional capability.
+- ACP client initialization now rejects an inbound JSON-RPC request instead of
+  waiting for the full initialize timeout. This makes echo processes and other
+  invalid peers fail promptly while still allowing unrelated notifications.
+- ACP client handlers can now return explicitly asynchronous permission, file,
+  terminal, and elicitation work. ExMCP monitors and cancels that work by the
+  original agent-request identity, while keeping handler-state updates
+  serialized. Long terminal waits and human decisions no longer prevent a
+  later kill/cancel callback from being dispatched, and timed-out, disconnected,
+  or cancelled requests cannot leave callback workers behind.
+- Pending single MCP requests are now owned by their calling process. If the
+  caller exits or its request times out, the client retires the local request,
+  cleans up its monitor, and sends the transport-appropriate cooperative
+  cancellation signal. Normal responses, peer cancellation, transport errors,
+  disconnects, and manual cancellation also release the caller monitor. This
+  prevents abandoned tool calls from remaining locally pending; as required by
+  MCP's cooperative model, it does not claim to roll back effects on a server
+  that ignores or cannot promptly process cancellation.
 - Full OAuth flow verification no longer expands broad inferred error and map
   unions that made compiling the module take minutes under Elixir 1.20.
 - The external MCP conformance client now round-trips complete JSON Schema

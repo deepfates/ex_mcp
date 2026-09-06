@@ -1,6 +1,7 @@
 defmodule ExMCP.Transport.StdioIsolationTest do
   use ExUnit.Case, async: false
 
+  alias ExMCP.Internal.OwnedProcess
   alias ExMCP.Transport.Stdio
 
   test "incremental frame accumulation accepts the limit and rejects one byte over" do
@@ -1017,10 +1018,10 @@ defmodule ExMCP.Transport.StdioIsolationTest do
       cat = System.find_executable("cat") || flunk("cat executable is required for stdio test")
 
       assert {:ok, %Stdio{port: port} = state} = Stdio.connect(command: [cat])
-      assert Port.info(port) != nil
+      assert OwnedProcess.alive?(port)
 
       assert :ok = Stdio.close(state)
-      assert Port.info(port) == nil
+      refute OwnedProcess.alive?(port)
     end
 
     test "close terminates the spawned OS process" do

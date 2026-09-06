@@ -129,6 +129,25 @@ defmodule ExMCP.ACP.ClientTest do
     end
   end
 
+  defmodule ClosingDuringInitializeTransport do
+    @behaviour ExMCP.Transport
+
+    @impl true
+    def connect(_opts), do: {:ok, %{}}
+
+    @impl true
+    def send_message(_message, state), do: {:ok, state}
+
+    @impl true
+    def receive_message(_state), do: {:error, :closed}
+
+    @impl true
+    def close(_state), do: :ok
+
+    @impl true
+    def connected?(_state), do: false
+  end
+
   # MockACPAgent: reads from to_agent_relay, writes to to_client_relay.
   defmodule MockACPAgent do
     def start(to_client_relay, to_agent_relay, opts \\ []) do
@@ -354,9 +373,20 @@ defmodule ExMCP.ACP.ClientTest do
 
         MessageRelay.push(state.to_client, perm_request)
 
-        if state.cancel_permission_request do
-          cancel_request = Jason.encode!(Protocol.encode_cancel_request(perm_id))
-          MessageRelay.push(state.to_client, cancel_request)
+        case state.cancel_permission_request do
+          true ->
+            cancel_request = Jason.encode!(Protocol.encode_cancel_request(perm_id))
+            MessageRelay.push(state.to_client, cancel_request)
+
+          :on_signal ->
+            receive do
+              :cancel_permission_request ->
+                cancel_request = Jason.encode!(Protocol.encode_cancel_request(perm_id))
+                MessageRelay.push(state.to_client, cancel_request)
+            end
+
+          false ->
+            :ok
         end
 
         # Wait for the permission response
@@ -481,6 +511,33 @@ defmodule ExMCP.ACP.ClientTest do
     end
   end
 
+  defmodule AsyncPermissionHandler do
+    @behaviour ExMCP.ACP.Client.Handler
+
+    @impl true
+    def init(opts), do: {:ok, %{parent: Keyword.fetch!(opts, :parent)}}
+
+    @impl true
+    def handle_session_update(_session_id, _update, state), do: {:ok, state}
+
+    @impl true
+    def handle_permission_request(_session_id, _tool_call, options, state) do
+      parent = state.parent
+
+      work = fn ->
+        send(parent, {:async_permission_handler_started, self()})
+
+        receive do
+          :release_permission_handler ->
+            option = List.first(options) || %{"optionId" => "allow"}
+            {:ok, %{"outcome" => "selected", "optionId" => option["optionId"]}}
+        end
+      end
+
+      {:async, work, state}
+    end
+  end
+
   # Handler that implements file_read but NOT file_write or terminal.
   # Used to assert capability auto-advertisement reflects per-callback support.
   defmodule FileReadOnlyHandler do
@@ -500,6 +557,26 @@ defmodule ExMCP.ACP.ClientTest do
     @impl true
     def handle_file_read(_session_id, _path, _opts, state) do
       {:ok, "file content", state}
+    end
+  end
+
+  defmodule StringErrorHandler do
+    @behaviour ExMCP.ACP.Client.Handler
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_session_update(_session_id, _update, state), do: {:ok, state}
+
+    @impl true
+    def handle_permission_request(_session_id, _tool_call, _options, state) do
+      {:error, "Permission denied", state}
+    end
+
+    @impl true
+    def handle_file_read(_session_id, _path, _opts, state) do
+      {:error, "Permission denied", state}
     end
   end
 
@@ -590,7 +667,7 @@ defmodule ExMCP.ACP.ClientTest do
   end
 
   describe "initialize handshake" do
-    test "stores agent capabilities" do
+    test "exposes the negotiated initialize handshake" do
       {client, _agent} = start_client()
 
       assert {:ok, caps} = Client.agent_capabilities(client)
@@ -601,6 +678,14 @@ defmodule ExMCP.ACP.ClientTest do
       assert [%{"id" => "api-key"}] = auth_methods
 
       assert Client.status(client) == :ready
+
+      assert {:ok, info} = Client.connection_info(client)
+      assert info["protocolVersion"] == 1
+      assert info["agentInfo"] == %{"name" => "mock_agent", "version" => "1.0.0"}
+      assert info["agentCapabilities"] == caps
+      assert info["authMethods"] == auth_methods
+      assert is_map(info["clientCapabilities"])
+      assert info["status"] == :ready
     end
 
     test "honors a configurable total initialize timeout and closes the transport" do
@@ -628,6 +713,23 @@ defmodule ExMCP.ACP.ClientTest do
       assert_receive :mock_acp_transport_closed, 200
     end
 
+    test "fails immediately when the transport closes during initialize" do
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :transport_closed} =
+               Task.async(fn ->
+                 Process.flag(:trap_exit, true)
+
+                 Client.start_link(
+                   transport_mod: ClosingDuringInitializeTransport,
+                   command: ["closed"]
+                 )
+               end)
+               |> Task.await(1_000)
+
+      assert System.monotonic_time(:millisecond) - started_at < 1_000
+    end
+
     test "unrelated initialize traffic cannot extend the total timeout" do
       {:ok, to_client_relay} = MessageRelay.start_link()
       {:ok, to_agent_relay} = MessageRelay.start_link()
@@ -649,6 +751,40 @@ defmodule ExMCP.ACP.ClientTest do
                  )
                end)
                |> Task.await(1_000)
+
+      assert_receive :mock_acp_transport_closed, 200
+    end
+
+    test "rejects an inbound request while awaiting initialize" do
+      {:ok, to_client_relay} = MessageRelay.start_link()
+      {:ok, to_agent_relay} = MessageRelay.start_link()
+      silent_agent = spawn_link(fn -> Process.sleep(:infinity) end)
+      test_pid = self()
+
+      MessageRelay.push(
+        to_client_relay,
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{}
+        })
+      )
+
+      assert {:error, :invalid_initialize_response} =
+               Task.async(fn ->
+                 Process.flag(:trap_exit, true)
+
+                 Client.start_link(
+                   transport_mod: MockACPTransport,
+                   command: ["mock"],
+                   agent_pid: silent_agent,
+                   to_client_relay: to_client_relay,
+                   to_agent_relay: to_agent_relay,
+                   close_listener: test_pid
+                 )
+               end)
+               |> Task.await()
 
       assert_receive :mock_acp_transport_closed, 200
     end
@@ -820,6 +956,21 @@ defmodule ExMCP.ACP.ClientTest do
   end
 
   describe "inbound agent request hardening" do
+    test "preserves a handler's bounded user-facing string error" do
+      {client, _agent} =
+        start_client(
+          [agent_request: {"fs/read_text_file", %{"path" => "/tmp/file.txt"}}],
+          handler: StringErrorHandler
+        )
+
+      assert {:ok, %{"sessionId" => session_id}} = Client.new_session(client, "/tmp")
+      assert {:ok, _result} = Client.prompt(client, session_id, "read")
+
+      assert_receive {:agent_request_response, %{"error" => error}}
+      assert error["code"] == -32_603
+      assert error["message"] == "Permission denied"
+    end
+
     test "dispatches an advertised form elicitation and returns accepted content" do
       {client, _agent} =
         start_client(
@@ -1474,13 +1625,13 @@ defmodule ExMCP.ACP.ClientTest do
         %{"optionId" => "deny", "name" => "Deny", "kind" => "reject_once"}
       ]
 
-      {client, _agent} =
+      {client, agent} =
         start_client(
           [
             permission_request: {tool_call, options},
-            cancel_permission_request: true
+            cancel_permission_request: :on_signal
           ],
-          handler: BlockingPermissionHandler,
+          handler: AsyncPermissionHandler,
           handler_opts: [parent: self()]
         )
 
@@ -1491,14 +1642,63 @@ defmodule ExMCP.ACP.ClientTest do
           Client.prompt(client, "sess_mock_001", "Write a file", timeout: 2_000)
         end)
 
-      assert_receive {:blocking_permission_handler_started, handler_pid}, 500
+      assert_receive {:async_permission_handler_started, worker}, 500
+      worker_monitor = Process.monitor(worker)
+      send(agent, :cancel_permission_request)
       assert_receive {:permission_response, resp}, 1_000
       assert resp["error"]["code"] == -32_800
       assert resp["error"]["message"] == "Request cancelled"
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}
 
       assert {:ok, _} = Task.await(task, 2_000)
-      send(handler_pid, :release_permission_handler)
       refute_receive {:permission_response, _late_response}, 200
+    end
+
+    test "handler timeout kills explicitly async work" do
+      tool_call = %{"toolCallId" => "tc_wait", "toolName" => "file_write"}
+      options = [%{"optionId" => "deny", "name" => "Deny", "kind" => "reject_once"}]
+
+      {client, _agent} =
+        start_client(
+          [permission_request: {tool_call, options}],
+          handler: AsyncPermissionHandler,
+          handler_opts: [parent: self()],
+          handler_request_timeout: 20
+        )
+
+      {:ok, _} = Client.new_session(client, "/tmp")
+      task = Task.async(fn -> Client.prompt(client, "sess_mock_001", "wait", timeout: 1_000) end)
+
+      assert_receive {:async_permission_handler_started, worker}
+      worker_monitor = Process.monitor(worker)
+      assert_receive {:permission_response, response}, 500
+      assert response["error"]["code"] == -32_603
+      assert response["error"]["message"] == "Client handler timed out"
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}
+      assert {:ok, _} = Task.await(task, 1_000)
+      assert :sys.get_state(client).pending_agent_requests == %{}
+    end
+
+    test "disconnect kills explicitly async work and resolves the prompt caller" do
+      tool_call = %{"toolCallId" => "tc_wait", "toolName" => "file_write"}
+      options = [%{"optionId" => "deny", "name" => "Deny", "kind" => "reject_once"}]
+
+      {client, _agent} =
+        start_client(
+          [permission_request: {tool_call, options}],
+          handler: AsyncPermissionHandler,
+          handler_opts: [parent: self()]
+        )
+
+      {:ok, _} = Client.new_session(client, "/tmp")
+      task = Task.async(fn -> Client.prompt(client, "sess_mock_001", "wait", timeout: 1_000) end)
+
+      assert_receive {:async_permission_handler_started, worker}
+      worker_monitor = Process.monitor(worker)
+      assert :ok = Client.disconnect(client)
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}
+      assert {:error, :disconnected} = Task.await(task, 1_000)
+      assert :sys.get_state(client).pending_agent_requests == %{}
     end
 
     test "expires a client handler request and ignores its late result" do
@@ -1612,6 +1812,40 @@ defmodule ExMCP.ACP.ClientTest do
 
       assert {:message_queue_len, queued} = Process.info(listener, :message_queue_len)
       assert queued <= 2
+    end
+
+    test "places a loss-aware event barrier after preceding listener updates" do
+      updates =
+        for index <- 1..5 do
+          %{
+            "sessionUpdate" => "agent_message_chunk",
+            "content" => %{"type" => "text", "text" => "chunk-#{index}"}
+          }
+        end
+
+      {client, _agent} =
+        start_client([updates: updates], event_listener: self(), max_update_queue: 2)
+
+      assert_receive {:initialize_request, _params}
+      assert {:ok, %{"sessionId" => session_id}} = Client.new_session(client, "/tmp")
+      assert_receive {:new_session_request, _params}
+      assert {:ok, _result} = Client.prompt(client, session_id, "stream")
+      barrier_ref = make_ref()
+      assert {:ok, ^barrier_ref} = Client.event_listener_barrier(client, session_id, barrier_ref)
+
+      assert_receive {:acp_session_update, ^session_id, first_update}
+      assert first_update["content"]["text"] == "chunk-1"
+
+      assert_receive {:acp_session_update, ^session_id, second_update}
+      assert second_update["content"]["text"] == "chunk-2"
+
+      assert_receive {:acp_event_listener_barrier, ^client, ^barrier_ref, ^session_id,
+                      %{dropped_updates: 3}}
+
+      assert {:ok, next_ref} = Client.event_listener_barrier(client, session_id)
+
+      assert_receive {:acp_event_listener_barrier, ^client, ^next_ref, ^session_id,
+                      %{dropped_updates: 0}}
     end
 
     test "rejects malformed and unknown session updates before dispatch" do

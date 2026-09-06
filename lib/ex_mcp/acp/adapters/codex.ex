@@ -270,10 +270,7 @@ defmodule ExMCP.ACP.Adapters.Codex do
         case session_config(params, cwd, state) do
           {:ok, config, additional_directories} ->
             wire_params =
-              %{
-                "threadId" => session_id,
-                "initialTurnsPage" => %{"limit" => 100, "itemsView" => "full"}
-              }
+              %{"threadId" => session_id}
               |> maybe_put("model", params["model"] || state.model)
               |> maybe_put("modelProvider", resume_model_provider(state))
               |> maybe_put("cwd", cwd)
@@ -1011,7 +1008,13 @@ defmodule ExMCP.ACP.Adapters.Codex do
   defp handle_notification("thread/started", params, state) do
     thread = params["thread"] || %{}
     session_id = Sessions.thread_id(thread, params)
-    session = session_from_result(session_id, params, state)
+
+    session =
+      case Sessions.fetch(state, session_id) do
+        {:ok, existing} -> merge_thread_started(existing, params, state)
+        {:error, _reason} -> session_from_result(session_id, params, state)
+      end
+
     {:skip, Sessions.put(state, session_id, session)}
   end
 
@@ -1047,7 +1050,9 @@ defmodule ExMCP.ACP.Adapters.Codex do
 
     state =
       Sessions.update(state, session_id, fn session ->
-        Map.put(session, :turn_id, turn_id)
+        session
+        |> Map.put(:turn_id, turn_id)
+        |> Map.put(:streamed_agent_items, MapSet.new())
       end)
 
     {:skip, state}
@@ -1061,6 +1066,11 @@ defmodule ExMCP.ACP.Adapters.Codex do
       Sessions.update(state, session_id, fn session ->
         session
         |> Map.update(:accumulated_text, [delta], &[delta | &1])
+        |> Map.update(
+          :streamed_agent_items,
+          MapSet.new([agent_item_id(params)]),
+          &MapSet.put(&1, agent_item_id(params))
+        )
         |> Map.put(:prompt_activity, true)
       end)
 
@@ -2130,12 +2140,24 @@ defmodule ExMCP.ACP.Adapters.Codex do
   end
 
   defp handle_item_completed(session_id, %{"type" => "agent_message"} = item, state) do
-    text = item["text"] || item["message"] || ""
+    case consume_streamed_agent_item(state, session_id, item) do
+      {true, state} ->
+        # Codex sends both live deltas and an item/completed snapshot for the
+        # same message. The snapshot confirms completion; it is not another
+        # message chunk. Emitting it duplicates both streamed UI text and the
+        # ACP client's accumulated prompt result.
+        {:skip, state}
 
-    notification =
-      AdapterEvents.agent_message_chunk(session_id, text, meta: %{"ex_mcp" => %{"final" => true}})
+      {false, state} ->
+        text = item["text"] || item["message"] || ""
 
-    {:messages, [notification], state}
+        notification =
+          AdapterEvents.agent_message_chunk(session_id, text,
+            meta: %{"ex_mcp" => %{"final" => true}}
+          )
+
+        {:messages, [notification], state}
+    end
   end
 
   defp handle_item_completed(session_id, %{"type" => "agentMessage"} = item, state) do
@@ -2290,6 +2312,36 @@ defmodule ExMCP.ACP.Adapters.Codex do
 
   defp handle_item_completed(_session_id, _item, state), do: {:skip, state}
 
+  defp consume_streamed_agent_item(nil, _session_id, _item), do: {false, nil}
+
+  defp consume_streamed_agent_item(state, session_id, item) do
+    session = Map.get(state.sessions, session_id, %{})
+    streamed = Map.get(session, :streamed_agent_items, MapSet.new())
+    item_id = agent_item_id(item)
+
+    matched_id =
+      cond do
+        MapSet.member?(streamed, item_id) -> item_id
+        MapSet.member?(streamed, :anonymous) -> :anonymous
+        true -> nil
+      end
+
+    if matched_id do
+      state =
+        Sessions.update(state, session_id, fn current ->
+          Map.update(current, :streamed_agent_items, MapSet.new(), &MapSet.delete(&1, matched_id))
+        end)
+
+      {true, state}
+    else
+      {false, state}
+    end
+  end
+
+  defp agent_item_id(value) do
+    value["itemId"] || value["item_id"] || value["id"] || :anonymous
+  end
+
   defp maybe_add_image_revised_prompt(content, prompt) when is_binary(prompt) and prompt != "" do
     content ++ [Events.tool_text_content("Revised prompt: #{prompt}")]
   end
@@ -2348,6 +2400,30 @@ defmodule ExMCP.ACP.Adapters.Codex do
   defp session_from_result(session_id, result, state) do
     Sessions.from_result(session_id, result, state, &model_id_for_session(&1, state))
   end
+
+  # Codex may deliver thread/started after the thread/start response. The
+  # notification often carries only thread identity, so rebuilding the session
+  # from it would erase the model and reasoning settings learned from the
+  # response. Merge only fields the notification actually supplies.
+  defp merge_thread_started(existing, params, state) do
+    thread = params["thread"] || %{}
+    model = params["model"] || existing[:model]
+    effort = params["reasoningEffort"] || existing[:reasoning_effort]
+
+    existing
+    |> Map.put(:thread, Map.merge(existing[:thread] || %{}, thread))
+    |> maybe_put_session_value(:cwd, params["cwd"] || thread["cwd"])
+    |> maybe_put_session_value(:model, model)
+    |> maybe_put_session_value(:reasoning_effort, effort)
+    |> maybe_put_session_value(:service_tier, params["serviceTier"])
+    |> maybe_put_session_value(:additional_directories, params["additionalDirectories"])
+    |> then(fn session ->
+      Map.put(session, :model_id, model_id_for_session(session, state))
+    end)
+  end
+
+  defp maybe_put_session_value(session, _key, nil), do: session
+  defp maybe_put_session_value(session, key, value), do: Map.put(session, key, value)
 
   defp fetch_turn_id(%{"turnId" => turn_id}, _session) when is_binary(turn_id) and turn_id != "",
     do: {:ok, turn_id}

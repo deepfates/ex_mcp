@@ -136,6 +136,8 @@ defmodule ExMCP.Server.Transport do
 
     # Configure the HTTP Plug. Tools are read from the handler module, so the
     # `tools` argument is not forwarded (ExMCP.HttpPlug.init/1 ignores it).
+    handler_opts = resolve_http_handler_opts(opts)
+
     plug_opts =
       [
         handler: module,
@@ -143,7 +145,8 @@ defmodule ExMCP.Server.Transport do
         legacy_http_sse: legacy_http_sse,
         cors_enabled: cors_enabled,
         allowed_hosts: allowed_hosts,
-        allowed_origins: allowed_origins
+        allowed_origins: allowed_origins,
+        handler_opts: handler_opts
       ] ++
         Keyword.take(opts, [
           :request_state,
@@ -361,6 +364,14 @@ defmodule ExMCP.Server.Transport do
       end
     else
       []
+    end
+  end
+
+  # Prefer explicit :handler_opts; fall back to :handler_args (Kite / DSL).
+  defp resolve_http_handler_opts(opts) do
+    case Keyword.fetch(opts, :handler_opts) do
+      {:ok, value} -> value
+      :error -> Keyword.get(opts, :handler_args, [])
     end
   end
 
