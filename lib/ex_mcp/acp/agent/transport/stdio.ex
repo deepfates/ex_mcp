@@ -20,22 +20,27 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
   @impl true
   def connect(opts) do
+    input = Keyword.get(opts, :input, :stdio)
     output = Keyword.get(opts, :output, :stdio)
 
     if output in [:stdio, :standard_io] do
       StdioLoggerConfig.configure()
-      # ACP JSON is UTF-8. Without this, a latin1 :standard_io (common when
-      # LANG is unset) crashes IO.puts with {:no_translation, :unicode, :latin1}.
-      _ = :io.setopts(:standard_io, encoding: :utf8)
-      _ = :io.setopts(:standard_error, encoding: :utf8)
     end
 
-    {:ok,
-     %__MODULE__{
-       input: Keyword.get(opts, :input, :stdio),
-       output: output,
-       max_frame_bytes: Options.positive_integer(opts, :max_frame_bytes, @default_max_frame_bytes)
-     }}
+    # JSON supplies UTF-8 bytes. Both directions must remain byte I/O: binread
+    # on a Unicode device otherwise tries Unicode -> Latin-1 conversion and
+    # fails on ellipses/emoji. Configure the wire devices once, before either
+    # reader or writer starts, rather than changing their encoding mid-frame.
+    with :ok <- byte_mode(input),
+         :ok <- byte_mode(output) do
+      {:ok,
+       %__MODULE__{
+         input: input,
+         output: output,
+         max_frame_bytes:
+           Options.positive_integer(opts, :max_frame_bytes, @default_max_frame_bytes)
+       }}
+    end
   end
 
   @impl true
@@ -121,20 +126,14 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
   defp stdio_device(:standard_io), do: :standard_io
   defp stdio_device(device), do: device
 
-  # Force latin1 byte mode then write raw UTF-8. Unicode put_chars on a
-  # Mix/File latin1 server exits {:no_translation, :unicode, :latin1};
-  # IO.binwrite on a unicode server double-encodes. :file.write after
-  # encoding: :latin1 is correct for both pipe and File devices.
+  defp byte_mode(device) do
+    :io.setopts(stdio_device(device), encoding: :latin1)
+  catch
+    :exit, _ -> {:error, :invalid_io_device}
+  end
+
   defp write_utf8_frame(device, message) do
     frame = IO.iodata_to_binary([message, ?\n])
-
-    _ =
-      try do
-        :io.setopts(device, encoding: :latin1)
-      catch
-        _kind, _reason -> :ok
-      end
-
     :file.write(device, frame)
   end
 end
