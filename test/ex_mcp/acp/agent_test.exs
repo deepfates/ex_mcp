@@ -572,6 +572,36 @@ defmodule ExMCP.ACP.AgentTest do
   end
 
   describe "native agent stdio framing" do
+    test "UTF-8 NDJSON stays exact across separate Unicode input/output devices" do
+      frame = Jason.encode!(%{text: "élan … 🪁"})
+      {:ok, input} = StringIO.open(frame <> "\n" <> frame <> "\n", encoding: :unicode)
+      {:ok, output} = StringIO.open("", encoding: :unicode)
+      {:ok, transport} = Stdio.connect(input: input, output: output)
+
+      # The first frame is Unicode too; correctness cannot depend on a previous
+      # ASCII response having switched the device encoding.
+      assert {:ok, ^frame, transport} = Stdio.receive_message(transport)
+      assert {:ok, transport} = Stdio.send_message(frame, transport)
+      assert {:ok, ^frame, transport} = Stdio.receive_message(transport)
+      assert {:ok, _} = Stdio.send_message(frame, transport)
+      assert {"", output_bytes} = StringIO.contents(output)
+      assert output_bytes == frame <> "\n" <> frame <> "\n"
+    end
+
+    test "UTF-8 frame limit counts bytes, not Unicode characters" do
+      frame = Jason.encode!(%{text: "🪁"})
+
+      for {limit, outcome} <- [{byte_size(frame), :ok}, {byte_size(frame) - 1, :error}] do
+        {:ok, io} = StringIO.open(frame <> "\n", encoding: :unicode)
+        {:ok, transport} = Stdio.connect(input: io, output: io, max_frame_bytes: limit)
+
+        case outcome do
+          :ok -> assert {:ok, ^frame, _} = Stdio.receive_message(transport)
+          :error -> assert {:error, :frame_too_large} = Stdio.receive_message(transport)
+        end
+      end
+    end
+
     test "custom IO devices do not mutate the global logger level" do
       level = :logger.get_primary_config()[:level]
       {:ok, input} = StringIO.open("")
