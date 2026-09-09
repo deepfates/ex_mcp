@@ -31,8 +31,8 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
     # on a Unicode device otherwise tries Unicode -> Latin-1 conversion and
     # fails on ellipses/emoji. Configure the wire devices once, before either
     # reader or writer starts, rather than changing their encoding mid-frame.
-    with :ok <- byte_mode(input),
-         :ok <- byte_mode(output) do
+    with :ok <- ExMCP.Stdio.byte_mode(input),
+         :ok <- ExMCP.Stdio.byte_mode(output) do
       {:ok,
        %__MODULE__{
          input: input,
@@ -52,7 +52,7 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
       when is_binary(message) do
     device = stdio_device(output)
 
-    case write_utf8_frame(device, message) do
+    case ExMCP.Stdio.write_frame(device, message) do
       :ok -> {:ok, state}
       {:error, reason} -> {:error, reason}
     end
@@ -69,7 +69,7 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
   # impose the limit before any unbounded line allocation. The collector batches
   # bytes into bounded binary chunks so the frame itself is built in linear space.
   defp read_frame(%__MODULE__{input: input} = state, chunks, chunk, chunk_size, size) do
-    case IO.binread(input, 1) do
+    case ExMCP.Stdio.read_bytes(input, 1) do
       :eof ->
         finish_eof(state, chunks, chunk, size)
 
@@ -125,15 +125,4 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
   defp stdio_device(:stdio), do: :standard_io
   defp stdio_device(:standard_io), do: :standard_io
   defp stdio_device(device), do: device
-
-  defp byte_mode(device) do
-    :io.setopts(stdio_device(device), encoding: :latin1)
-  catch
-    :exit, _ -> {:error, :invalid_io_device}
-  end
-
-  defp write_utf8_frame(device, message) do
-    frame = IO.iodata_to_binary([message, ?\n])
-    :file.write(device, frame)
-  end
 end
