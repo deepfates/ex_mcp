@@ -89,6 +89,19 @@ removes the replay request.
 Do not "restore parity with upstream" here without checking what the host does
 with a replay first.
 
+## Do not contact upstream
+
+The intent above is a direction, not a licence to act on it. Nothing leaves
+these repositories: no issues, pull requests, comments or messages to
+`azmaveth/ex_mcp` or anywhere else, however obviously useful, until the owner
+says otherwise. This is a standing decision, and it has been enforced before —
+`azmaveth/ex_mcp#41` proposed the server-side stdio patch on 2026-09-09 and was
+closed.
+
+So "the most obviously upstreamable patch here" means *if the owner opens that
+door*, start with the three-line `security:` fix. It does not mean send it.
+Fixes live here, with their reason beside them.
+
 ## If you are about to change a pin
 
 Run the consumer's own interoperability check, not just its unit tests. For Kite
