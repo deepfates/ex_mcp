@@ -7,7 +7,7 @@ defmodule ExMCP.ACP.LifecycleParams do
 
   @spec client_opts(keyword()) :: keyword()
   def client_opts(opts) when is_list(opts) do
-    Keyword.take(opts, [:mcp_servers, :additional_directories])
+    Keyword.take(opts, [:mcp_servers, :additional_directories, :meta])
   end
 
   @spec validate_cwd(any()) :: :ok | {:error, {:invalid_params, :cwd_must_be_absolute}}
@@ -70,7 +70,32 @@ defmodule ExMCP.ACP.LifecycleParams do
     params
     |> Map.put("mcpServers", mcp_servers(opts))
     |> Maps.put_present("additionalDirectories", validate_additional_directories!(opts))
+    |> Maps.put_present("_meta", meta(opts))
   end
+
+  @doc """
+  Per-session data the protocol does not model, carried in `_meta`.
+
+  ACP's own extension point, namespaced by whoever defines the key, so a host
+  can name something the agent understands without either side inventing a
+  top-level field. An agent that hosts several personae is the case this exists
+  for: without it a host can only reach whichever one the agent process was
+  started as.
+  """
+  @spec meta(keyword() | map() | nil) :: map() | nil
+  def meta(opts) when is_list(opts) do
+    if Keyword.keyword?(opts), do: present_map(Keyword.get(opts, :meta)), else: nil
+  end
+
+  def meta(%{} = opts) do
+    present_map(Maps.get(opts, "_meta") || Maps.get(opts, :_meta) || Maps.get(opts, :meta))
+  end
+
+  def meta(nil), do: nil
+
+  # An empty map is not data a peer should have to distinguish from none.
+  defp present_map(%{} = value) when map_size(value) > 0, do: value
+  defp present_map(_value), do: nil
 
   @spec mcp_servers(keyword() | map() | nil) :: list()
   def mcp_servers(opts) when is_list(opts) do

@@ -81,4 +81,30 @@ defmodule ExMCP.ACP.LifecycleParamsTest do
       assert :ok = LifecycleParams.validate(opts, caps)
     end
   end
+  describe "session _meta" do
+    test "a client may carry per-session data the protocol does not model" do
+      params =
+        LifecycleParams.normalize(%{"cwd" => "/tmp"},
+          meta: %{"dwell" => %{"character" => "gregory"}}
+        )
+
+      assert params["_meta"] == %{"dwell" => %{"character" => "gregory"}}
+    end
+
+    test "client_opts keeps meta, so new_session can send it" do
+      assert LifecycleParams.client_opts(meta: %{"a" => 1}, timeout: 5) == [meta: %{"a" => 1}]
+    end
+
+    test "no meta, or an empty one, leaves the key off the wire" do
+      refute Map.has_key?(LifecycleParams.normalize(%{"cwd" => "/tmp"}, []), "_meta")
+      refute Map.has_key?(LifecycleParams.normalize(%{"cwd" => "/tmp"}, meta: %{}), "_meta")
+      refute Map.has_key?(LifecycleParams.normalize(%{"cwd" => "/tmp"}, nil), "_meta")
+    end
+
+    test "a map of options carries meta under either spelling" do
+      assert LifecycleParams.meta(%{"_meta" => %{"k" => 1}}) == %{"k" => 1}
+      assert LifecycleParams.meta(%{meta: %{"k" => 2}}) == %{"k" => 2}
+    end
+  end
+
 end
