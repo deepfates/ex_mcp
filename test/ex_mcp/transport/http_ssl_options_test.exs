@@ -193,5 +193,46 @@ defmodule ExMCP.Transport.HTTPSslOptionsTest do
         assert {"X-Safe", "value"} in sanitized
       end
     end
+
+    test "a client can trust the exact configured MCP origin without changing global policy" do
+      previous = Application.get_env(:ex_mcp, :security)
+
+      Application.put_env(:ex_mcp, :security,
+        trusted_origins: [],
+        trusted_hosts: [],
+        consent_handler: ExMCP.ConsentHandler.Deny,
+        enable_token_passthrough_prevention: true,
+        enable_user_consent_validation: true
+      )
+
+      on_exit(fn ->
+        if is_nil(previous),
+          do: Application.delete_env(:ex_mcp, :security),
+          else: Application.put_env(:ex_mcp, :security, previous)
+      end)
+
+      state = %HTTP{
+        headers: [],
+        security: %{trusted_origins: ["https://mcp.example.com"]}
+      }
+
+      headers = [{"Authorization", "Bearer sentinel"}]
+
+      assert {:ok, ^headers} =
+               HTTP.sanitize_http_request(
+                 "POST",
+                 "https://mcp.example.com/tools",
+                 headers,
+                 state
+               )
+
+      assert {:error, %ExMCP.Transport.SecurityError{type: :consent_denied}} =
+               HTTP.sanitize_http_request(
+                 "POST",
+                 "https://other.example.com/tools",
+                 headers,
+                 state
+               )
+    end
   end
 end

@@ -24,6 +24,9 @@ defmodule ExMCP.Security.Validation do
           optional(:headers) => [{String.t(), String.t()}],
           optional(:validate_origin) => boolean(),
           optional(:allowed_origins) => [String.t()],
+          optional(:trusted_origins) => [String.t()],
+          optional(:trusted_hosts) => [String.t()],
+          optional(:additional_sensitive_headers) => [String.t()],
           optional(:cors) => map(),
           optional(:tls) => map()
         }

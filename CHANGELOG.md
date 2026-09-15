@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The HTTP transport now honors `trusted_origins`, `trusted_hosts`, and
+  `additional_sensitive_headers` given in a connection's `security:` option.
+  The option was accepted and validated but never reached
+  `ExMCP.Transport.SecurityGuard`, which only consulted the global
+  `config :ex_mcp, :security`, so a client could not trust the one origin it
+  was configured to talk to without widening application-wide policy. The
+  per-connection values are merged over the global configuration for that
+  connection's requests only.
+
 ## [1.3.0] - 2026-09-05
 
 - ACP client handlers can receive the decoded JSON-RPC message for session updates and
