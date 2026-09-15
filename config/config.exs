@@ -236,7 +236,7 @@ end
 
 if Mix.env() == :dev do
   config :git_hooks,
-    auto_install: true,
+    auto_install: false,
     verbose: true,
     hooks: [
       pre_commit: [
