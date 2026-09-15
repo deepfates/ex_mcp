@@ -8,7 +8,7 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
   @behaviour ExMCP.ACP.Agent.Transport
 
-  alias ExMCP.Internal.{Options, StdioLoggerConfig}
+  alias ExMCP.Internal.{Options, StdioFrames, StdioLoggerConfig}
 
   @default_max_frame_bytes 1_048_576
   @collector_chunk_bytes 4_096
@@ -20,18 +20,26 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
   @impl true
   def connect(opts) do
+    input = Keyword.get(opts, :input, :stdio)
     output = Keyword.get(opts, :output, :stdio)
 
     if output in [:stdio, :standard_io] do
       StdioLoggerConfig.configure()
     end
 
-    {:ok,
-     %__MODULE__{
-       input: Keyword.get(opts, :input, :stdio),
-       output: output,
-       max_frame_bytes: Options.positive_integer(opts, :max_frame_bytes, @default_max_frame_bytes)
-     }}
+    # Frames are bytes in both directions. Put the devices in byte mode once,
+    # before either the reader or the writer starts, rather than changing
+    # their encoding mid-frame.
+    with :ok <- StdioFrames.byte_mode(input),
+         :ok <- StdioFrames.byte_mode(output) do
+      {:ok,
+       %__MODULE__{
+         input: input,
+         output: output,
+         max_frame_bytes:
+           Options.positive_integer(opts, :max_frame_bytes, @default_max_frame_bytes)
+       }}
+    end
   end
 
   @impl true
@@ -41,8 +49,10 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
 
   def send_message(message, %__MODULE__{output: output} = state)
       when is_binary(message) do
-    IO.puts(output, message)
-    {:ok, state}
+    case StdioFrames.write_frame(output, message) do
+      :ok -> {:ok, state}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @impl true
@@ -56,7 +66,7 @@ defmodule ExMCP.ACP.Agent.Transport.Stdio do
   # impose the limit before any unbounded line allocation. The collector batches
   # bytes into bounded binary chunks so the frame itself is built in linear space.
   defp read_frame(%__MODULE__{input: input} = state, chunks, chunk, chunk_size, size) do
-    case IO.binread(input, 1) do
+    case StdioFrames.read_bytes(input, 1) do
       :eof ->
         finish_eof(state, chunks, chunk, size)
 

@@ -51,7 +51,16 @@ defmodule ExMCP.Server.StdioServer do
   require Logger
 
   alias ExMCP.Error.ProtocolError
-  alias ExMCP.Internal.{JSONRPC, LogSummary, MessageValidator, StdioLoggerConfig, VersionRegistry}
+
+  alias ExMCP.Internal.{
+    JSONRPC,
+    LogSummary,
+    MessageValidator,
+    StdioFrames,
+    StdioLoggerConfig,
+    VersionRegistry
+  }
+
   alias ExMCP.Protocol.ErrorCodes
 
   alias ExMCP.Server.{
@@ -89,6 +98,9 @@ defmodule ExMCP.Server.StdioServer do
     # CRITICAL: For STDIO transport, suppress ALL logging to avoid contaminating JSON stream
     # MCP STDIO protocol requires ONLY JSON-RPC messages on stdout
     configure_stdio_logging()
+    # Frames are bytes; StdioFrames owns what that means for a device. Set it
+    # before either the reader or the writer starts.
+    :ok = StdioFrames.byte_mode(:stdio)
 
     module = Keyword.fetch!(opts, :module)
     {subscription_opts, owned_subscription_runtime} = ensure_subscription_runtime(opts)
@@ -443,7 +455,7 @@ defmodule ExMCP.Server.StdioServer do
   # Send a successful response
   defp send_response(response, _state) do
     json = Jason.encode!(response)
-    IO.puts(json)
+    StdioFrames.write_frame(:stdio, json)
   end
 
   # Send an error response
@@ -451,7 +463,7 @@ defmodule ExMCP.Server.StdioServer do
     response = JSONRPC.error(id, code, message)
 
     json = Jason.encode!(response)
-    IO.puts(json)
+    StdioFrames.write_frame(:stdio, json)
   end
 
   # Configure logging for STDIO transport to prevent stdout contamination
@@ -461,7 +473,7 @@ defmodule ExMCP.Server.StdioServer do
 
   # Read from stdin in a loop and send lines to the main process
   defp read_stdin_loop(server_pid) do
-    case IO.read(:stdio, :line) do
+    case StdioFrames.read_line(:stdio) do
       :eof ->
         send(server_pid, {:stdin_closed})
 

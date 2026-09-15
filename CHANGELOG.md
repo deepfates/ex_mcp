@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The stdio MCP server and the ACP agent stdio transport read and write
+  JSON-RPC frames as raw bytes, independent of the encoding the standard
+  streams were opened with. Previously both used character I/O, so a VM
+  started without `LANG`/`LC_ALL` (a latin1 device) exited with
+  `{:no_translation, :unicode, :latin1}` on the first frame containing
+  non-ASCII text, and a unicode device re-encoded or rejected incoming bytes.
+  An internal StdioFrames module now owns byte mode and frame reads and
+  writes for both transports.
+
 ## [1.3.0] - 2026-09-05
 
 - ACP client handlers can receive the decoded JSON-RPC message for session updates and

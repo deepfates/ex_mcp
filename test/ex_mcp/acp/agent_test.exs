@@ -572,6 +572,28 @@ defmodule ExMCP.ACP.AgentTest do
   end
 
   describe "native agent stdio framing" do
+    test "UTF-8 frames cross devices the environment left in latin1 or unicode mode" do
+      # A VM started without a locale gets a latin1 standard stream; a VM
+      # started by the Elixir CLI gets a unicode one. Frames must survive both.
+      dir = Path.join(System.tmp_dir!(), "ex-mcp-acp-stdio-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      frame = Jason.encode!(%{text: "élan … 🪁"})
+      input_path = Path.join(dir, "input")
+      output_path = Path.join(dir, "output")
+      File.write!(input_path, frame <> "\n")
+      {:ok, input} = File.open(input_path, [:read, {:encoding, :unicode}])
+      {:ok, output} = File.open(output_path, [:write, {:encoding, :latin1}])
+
+      {:ok, transport} = Stdio.connect(input: input, output: output)
+
+      assert {:ok, ^frame, transport} = Stdio.receive_message(transport)
+      assert {:ok, _transport} = Stdio.send_message(frame, transport)
+      :ok = File.close(output)
+      assert File.read!(output_path) == frame <> "\n"
+    end
+
     test "custom IO devices do not mutate the global logger level" do
       level = :logger.get_primary_config()[:level]
       {:ok, input} = StringIO.open("")
