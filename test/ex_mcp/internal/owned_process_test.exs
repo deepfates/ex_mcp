@@ -13,6 +13,31 @@ defmodule ExMCP.Internal.OwnedProcessTest do
     assert :ok = OwnedProcess.close(process)
   end
 
+  test "closing a handle whose child has just exited returns ok" do
+    shell = System.find_executable("sh") || flunk("sh executable is required")
+    flag = Path.join(System.tmp_dir!(), "owned-process-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(flag) end)
+
+    script = "while [ ! -e \"$1\" ]; do sleep 0.01; done"
+
+    assert {:ok, process} =
+             OwnedProcess.open(shell, ["-c", script, "sh", flag], cd: File.cwd!(), env: [])
+
+    %{exec_pid: exec_pid} = :sys.get_state(process.pid)
+
+    # Queue the close before the child exits, then let the child exit while
+    # the handle is suspended, so erlexec has already forgotten the child by
+    # the time the close is handled but the handle has not yet seen its DOWN.
+    :ok = :sys.suspend(process.pid)
+    closer = Task.async(fn -> OwnedProcess.close(process) end)
+    File.touch!(flag)
+    refute eventually(fn -> Process.alive?(exec_pid) end)
+    :ok = :sys.resume(process.pid)
+
+    assert :ok = Task.await(closer, 5_000)
+    refute Process.alive?(process.pid)
+  end
+
   @tag :unix
   test "owner death tears down the isolated process group" do
     parent = self()
