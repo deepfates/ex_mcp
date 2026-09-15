@@ -150,10 +150,13 @@ defmodule ExMCP.Internal.OwnedProcess do
 
   def terminate(_reason, _state), do: :ok
 
+  # erlexec forgets a child as soon as it exits, before the linked exec pid
+  # goes down, so a close that races the child's own exit is told there is
+  # no process to stop. That is the outcome close wants.
   defp stop_exec(exec_pid) do
     case :exec.stop(exec_pid) do
       :ok -> :ok
-      {:error, :not_found} -> :ok
+      {:error, :no_process} -> :ok
       {:error, reason} -> {:error, reason}
     end
   catch
