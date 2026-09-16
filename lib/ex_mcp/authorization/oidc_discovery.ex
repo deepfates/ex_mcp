@@ -47,11 +47,10 @@ defmodule ExMCP.Authorization.OIDCDiscovery do
   """
   @spec discover(String.t(), keyword()) :: {:ok, oidc_metadata()} | {:error, term()}
   def discover(issuer, opts \\ []) do
-    with :ok <- validate_issuer_url(issuer, opts),
-         urls <- build_discovery_urls(issuer),
-         {:ok, metadata} <- try_urls(urls, metadata_options(opts), nil),
-         :ok <- validate_metadata(metadata, issuer, opts) do
-      {:ok, metadata}
+    with :ok <- validate_issuer_url(issuer, opts) do
+      issuer
+      |> build_discovery_urls()
+      |> try_urls(issuer, opts, metadata_options(opts), nil)
     end
   end
 
@@ -77,16 +76,33 @@ defmodule ExMCP.Authorization.OIDCDiscovery do
     end
   end
 
-  defp try_urls([], _opts, nil), do: {:error, :discovery_failed}
-  defp try_urls([], _opts, last_error), do: last_error
+  # A location that answers with a document is not yet the answer: an issuer
+  # serving several tenants under one host answers the path-appended
+  # `.well-known` with the host's own document (issuer `https://host/`), and the
+  # RFC 8414 location with the tenant's (issuer `https://host/tenant/`).
+  # Readwise does exactly this. The first document whose issuer is the one
+  # asked for wins; a document naming another issuer moves on to the next
+  # location. When no location matches, a document that named another issuer
+  # is the error to report, ahead of the 404 of whichever location was probed
+  # last: it says what the server actually answered.
+  defp try_urls([], _issuer, _opts, _fetch_opts, nil), do: {:error, :discovery_failed}
+  defp try_urls([], _issuer, _opts, _fetch_opts, last_error), do: last_error
 
-  defp try_urls([url | rest], opts, _last_error) do
-    case fetch_metadata(url, opts) do
-      {:ok, metadata} -> {:ok, metadata}
-      {:error, {:metadata_fetch_error, _reason}} = error -> error
-      {:error, _reason} = error -> try_urls(rest, opts, error)
+  defp try_urls([url | rest], issuer, opts, fetch_opts, last_error) do
+    with {:ok, metadata} <- fetch_metadata(url, fetch_opts),
+         :ok <- validate_metadata(metadata, issuer, opts) do
+      {:ok, metadata}
+    else
+      {:error, {:metadata_fetch_error, _reason}} = error ->
+        error
+
+      {:error, _reason} = error ->
+        try_urls(rest, issuer, opts, fetch_opts, keep_more_telling(last_error, error))
     end
   end
+
+  defp keep_more_telling({:error, {:issuer_mismatch, _}} = kept, _new), do: kept
+  defp keep_more_telling(_kept, new), do: new
 
   @doc """
   Validates that the discovered metadata contains required OIDC fields.

@@ -68,6 +68,74 @@ defmodule ExMCP.Authorization.OIDCDiscoveryTest do
                discover_with_client("https://auth.example.com", http_client)
     end
 
+    test "moves past a document naming another issuer to the location that names this one" do
+      # A host serving several issuers under paths answers the path-appended
+      # location with the host's own document; the tenant's lives at the
+      # RFC 8414 location. Readwise: issuer https://readwise.io/o/.
+      tenant = %{
+        "issuer" => "https://auth.example.com/o/",
+        "authorization_endpoint" => "https://auth.example.com/o/authorize/",
+        "token_endpoint" => "https://auth.example.com/o/token/"
+      }
+
+      host = %{
+        "issuer" => "https://auth.example.com/",
+        "authorization_endpoint" => "https://auth.example.com/authorize",
+        "token_endpoint" => "https://auth.example.com/token"
+      }
+
+      http_client =
+        mock_http_client(%{
+          "https://auth.example.com/o/.well-known/openid-configuration" =>
+            {:ok, %{status: 200, body: Jason.encode!(host)}},
+          "https://auth.example.com/o/.well-known/oauth-authorization-server" =>
+            {:ok, %{status: 200, body: Jason.encode!(tenant)}}
+        })
+
+      assert {:ok, ^tenant} = discover_with_client("https://auth.example.com/o/", http_client)
+    end
+
+    test "reports the issuer mismatch when no location names the issuer asked for" do
+      host = %{
+        "issuer" => "https://auth.example.com/",
+        "authorization_endpoint" => "https://auth.example.com/authorize",
+        "token_endpoint" => "https://auth.example.com/token"
+      }
+
+      mismatch =
+        {:error,
+         {:issuer_mismatch,
+          expected: "https://auth.example.com/o/", actual: "https://auth.example.com/"}}
+
+      # The mismatching document first, then nothing: the mismatch is the
+      # error, not the 404 of the last location probed.
+      first_wrong =
+        mock_http_client(%{
+          "https://auth.example.com/o/.well-known/openid-configuration" =>
+            {:ok, %{status: 200, body: Jason.encode!(host)}},
+          "https://auth.example.com/o/.well-known/oauth-authorization-server" =>
+            {:ok, %{status: 404}},
+          "https://auth.example.com/.well-known/oauth-authorization-server/o" =>
+            {:ok, %{status: 404}},
+          "https://auth.example.com/.well-known/openid-configuration/o" => {:ok, %{status: 404}}
+        })
+
+      assert ^mismatch = discover_with_client("https://auth.example.com/o/", first_wrong)
+
+      last_wrong =
+        mock_http_client(%{
+          "https://auth.example.com/o/.well-known/openid-configuration" => {:ok, %{status: 404}},
+          "https://auth.example.com/o/.well-known/oauth-authorization-server" =>
+            {:ok, %{status: 404}},
+          "https://auth.example.com/.well-known/oauth-authorization-server/o" =>
+            {:ok, %{status: 404}},
+          "https://auth.example.com/.well-known/openid-configuration/o" =>
+            {:ok, %{status: 200, body: Jason.encode!(host)}}
+        })
+
+      assert ^mismatch = discover_with_client("https://auth.example.com/o/", last_wrong)
+    end
+
     test "returns error when all endpoints fail" do
       http_client =
         mock_http_client(%{

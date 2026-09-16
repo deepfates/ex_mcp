@@ -81,6 +81,7 @@ defmodule ExMCP.ACP.LifecycleParamsTest do
       assert :ok = LifecycleParams.validate(opts, caps)
     end
   end
+
   describe "session _meta" do
     test "a client may carry per-session data the protocol does not model" do
       params =
@@ -106,5 +107,4 @@ defmodule ExMCP.ACP.LifecycleParamsTest do
       assert LifecycleParams.meta(%{meta: %{"k" => 2}}) == %{"k" => 2}
     end
   end
-
 end
