@@ -79,6 +79,20 @@ defmodule ExMCP.Transport.HTTP do
   > 3. **Bind to localhost** when possible for local servers
   > 4. **Implement proper authentication** (bearer tokens, API keys, etc.)
   > 5. **Set restrictive CORS policies** for cross-origin requests
+
+  ## The MCP endpoint path
+
+  The path of `:url` is the MCP endpoint. `"https://example.com/mcp"` posts to
+  `/mcp`, and `"https://example.com/"` posts to `/` — a written `"/"` is
+  honoured, because servers do serve MCP at their root. Only a URL with no path
+  at all (`"https://example.com"`) falls back to the `/mcp/v1`
+  default. `:endpoint` overrides the path in either case.
+
+  ## The Origin header
+
+  This transport sends `Origin` only when `security: %{origin: "..."}` says to.
+  An HTTP client is not a browser, so there is nothing for it to assert, and
+  servers that allow-list browser origins reject a self-asserted one with 403.
   """
 
   @behaviour ExMCP.Transport
@@ -209,11 +223,16 @@ defmodule ExMCP.Transport.HTTP do
       endpoint_hash: LogSummary.fingerprint({base_url, endpoint})
     )
 
-    # Extract origin if provided
+    # Send an Origin header only when the caller configured one. An HTTP client
+    # is not a browser: asserting the server's own origin back at it carries no
+    # information, and servers that allow-list browser origins answer 403
+    # ("Origin not permitted", observed on a public MCP server). Servers that
+    # need DNS rebinding protection get it from Host validation, which is what
+    # ExMCP.HttpPlug does for requests that carry no Origin.
     origin =
       case security do
         %{origin: origin} -> origin
-        _ -> extract_origin_from_url(base_url)
+        _ -> nil
       end
 
     # Build security headers
@@ -1450,6 +1469,10 @@ defmodule ExMCP.Transport.HTTP do
 
   defp normalize_endpoint(""), do: ""
 
+  # The root endpoint stays "/": trimming it to "" would leave the request URL
+  # without a path.
+  defp normalize_endpoint("/"), do: "/"
+
   defp normalize_endpoint(endpoint) do
     endpoint
     |> ensure_leading_slash()
@@ -1477,15 +1500,16 @@ defmodule ExMCP.Transport.HTTP do
 
   # Split a full URL into {base_url, path} so callers can pass a single URL.
   # "http://localhost:3000/mcp" → {"http://localhost:3000", "/mcp"}
+  # "http://localhost:3000/" → {"http://localhost:3000", "/"} (root endpoint)
   # "http://localhost:3000" → {"http://localhost:3000", "/mcp/v1"} (default)
+  #
+  # Only a URL with no path at all gets the default endpoint. A written "/" is
+  # a path the caller chose, and some servers do serve MCP at the root.
   defp split_url_path(url) do
     uri = URI.parse(url)
 
     case uri.path do
       nil ->
-        {url, @default_endpoint}
-
-      "/" ->
         {url, @default_endpoint}
 
       "" ->
@@ -1496,20 +1520,6 @@ defmodule ExMCP.Transport.HTTP do
         {base, path}
     end
   end
-
-  defp extract_origin_from_url(url) do
-    uri = URI.parse(url)
-
-    if uri.scheme && uri.host do
-      "#{uri.scheme}://#{uri.host}#{if uri.port && uri.port != default_port(uri.scheme), do: ":#{uri.port}", else: ""}"
-    else
-      nil
-    end
-  end
-
-  defp default_port("http"), do: 80
-  defp default_port("https"), do: 443
-  defp default_port(_), do: nil
 
   @doc """
   Builds SSL options from TLS configuration.

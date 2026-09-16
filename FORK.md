@@ -89,6 +89,45 @@ removes the replay request.
 Do not "restore parity with upstream" here without checking what the host does
 with a replay first.
 
+### The HTTP client has to survive ordinary public servers
+
+Three separate patches, all found by pointing the client at public MCP servers
+(Scry, Exa, Readwise) and reading the failures.
+
+**No self-asserted `Origin`.** Upstream derives an `Origin` header from the
+server's own base URL when `security: %{origin: ...}` is not set. A non-browser
+client asserting the server's origin back at it says nothing, and a server that
+allow-lists browser origins answers `403 Origin not permitted` — which is what
+Scry's `/mcp` does. The header is now sent only when it is configured. Nothing
+server-side depended on the client sending it: `ExMCP.HttpPlug` already allows
+requests with no `Origin` and protects them with Host validation, and the
+localhost `allowed_origins` default in `ExMCP.Server.Transport` exists for
+callers that do send one. The comment there that justified the default by "our
+client sends an Origin" was corrected.
+
+**A written `/` is a path.** Upstream mapped path `nil`, `""` *and* `"/"` to the
+`/mcp/v1` default, so a server that serves MCP at its root (Scry answers
+`initialize` on `POST https://mcp.scry.io`) was unreachable — the client posted
+to `/mcp/v1` and got a 404. Only a URL with no path at all defaults now.
+
+**An HTTP 4xx on the era probe is not a modern server.** In `:prefer_modern`
+the client first sends the nonstandard `server/discover`. A standard server may
+refuse that at the HTTP level rather than with a JSON-RPC error (`404` from
+Scry, `403` for the origin case above), and
+`ConnectionManager.legacy_fallback_evidence?/1` did not count those, so the
+client gave up without ever trying the standard `initialize`. Any 4xx except
+`401` now counts, on a transport that is still alive. `401` stays out: the HTTP
+transport reports it as `{:unauthorized, 401, _, _}` and runs the OAuth
+challenge flow, and an auth failure says nothing about the protocol era.
+
+`:prefer_modern` stays the default, deliberately. With the fix it reaches a
+standard server in one extra request, cached per endpoint by `EraCache`, and the
+mirror-image path is worse: `:prefer_legacy` falls forward only on
+`legacy_protocol_failure?/1`, which has the same HTTP-status blind spot and no
+safe fix — a 4xx on `initialize` is far more likely a broken endpoint or an auth
+problem than evidence that the server is modern. Flipping the default would
+trade a bug we have fixed for one we cannot classify.
+
 ## Do not contact upstream
 
 The intent above is a direction, not a licence to act on it. Nothing leaves

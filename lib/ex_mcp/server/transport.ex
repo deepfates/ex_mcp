@@ -351,11 +351,15 @@ defmodule ExMCP.Server.Transport do
   end
 
   # Origin allow-list for ExMCP.HttpPlug. HttpPlug no longer has a
-  # same-origin fallback (Host is attacker-controlled under DNS rebinding),
-  # and ExMCP's own HTTP client sends an Origin derived from the server URL,
-  # so localhost binds explicitly allow localhost origins for the bound port.
+  # same-origin fallback (Host is attacker-controlled under DNS rebinding), so
+  # localhost binds explicitly allow localhost origins for the bound port.
   # This is rebinding-safe: a rebinding attack presents the attacker page's
   # real (non-localhost) origin.
+  #
+  # ExMCP's own HTTP client does not send an Origin unless one is configured;
+  # originless requests are allowed by HttpPlug and protected by Host
+  # validation instead. This list is for callers that do send one — browsers,
+  # and clients configured with `security: %{origin: ...}`.
   defp default_allowed_origins(host, port) do
     if localhost_bind?(host) do
       for h <- ["localhost", "127.0.0.1", "[::1]"],

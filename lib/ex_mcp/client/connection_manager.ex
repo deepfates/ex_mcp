@@ -232,7 +232,28 @@ defmodule ExMCP.Client.ConnectionManager do
 
   defp legacy_fallback_evidence?({:probe_timeout, _reason}), do: true
   defp legacy_fallback_evidence?({:http_probe_rejected, _response}), do: true
+
+  # A server that does not implement "server/discover" may reject the probe at
+  # the HTTP level rather than with a JSON-RPC error: 404 when the method has
+  # no route, 403 when a gateway refuses it, 405, 415, 400. None of those says
+  # the server speaks the modern era, so the standard `initialize` must still
+  # be tried before the connection is abandoned.
+  #
+  # 401 is excluded: authentication is the transport's business (the HTTP
+  # transport reports it as `{:unauthorized, 401, _, _}` and runs the OAuth
+  # challenge flow), and an auth failure says nothing about the protocol era.
+  defp legacy_fallback_evidence?({:transport_error, {:http_error, status, _body}}),
+    do: probe_rejection_status?(status)
+
+  defp legacy_fallback_evidence?({:transport_error, {:http_error, status}}),
+    do: probe_rejection_status?(status)
+
   defp legacy_fallback_evidence?(_reason), do: false
+
+  defp probe_rejection_status?(status) when is_integer(status),
+    do: status in 400..499 and status != 401
+
+  defp probe_rejection_status?(_status), do: false
 
   defp modern_specific_error?(%{"code" => -32022, "data" => data}) when is_map(data) do
     is_list(data["supported"]) and is_binary(data["requested"])
