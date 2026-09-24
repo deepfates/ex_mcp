@@ -331,22 +331,22 @@ defmodule ExMCP.Transport.StdioIsolationTest do
       end
     end
 
-    test "handles multiple JSON lines in single data chunk" do
-      # Test handling multiple lines without calling process_data
-      json1 = ~s({"jsonrpc":"2.0","method":"tools/list","id":1})
-      json2 = ~s({"jsonrpc":"2.0","method":"resources/list","id":2})
-      data_chunk = json1 <> "\n" <> json2 <> "\n"
+    test "every frame of a chunk carrying several is delivered without more output" do
+      # A pipe delivers whatever bytes are ready, so two frames written back to
+      # back (an ACP session/update and the prompt result) often arrive as one
+      # port message, sometimes behind a banner or a blank line. Every frame
+      # must come out of the buffer, not wait for output the program may never
+      # send.
+      shell = System.find_executable("sh") || flunk("sh executable is required for stdio test")
+      json1 = ~s({"jsonrpc":"2.0","method":"session/update","params":{}})
+      json2 = ~s({"jsonrpc":"2.0","id":3,"result":{}})
+      script = "printf 'starting\\n\\n%s\\n%s\\n' '#{json1}' '#{json2}'; exec sleep 30"
 
-      # Simulate line processing
-      lines = String.split(data_chunk, "\n", trim: true)
-      assert length(lines) == 2
-      assert Enum.at(lines, 0) == json1
-      assert Enum.at(lines, 1) == json2
+      assert {:ok, state} = Stdio.connect(command: [shell, "-c", script])
+      on_exit(fn -> Stdio.close(state) end)
 
-      # Verify each line is valid JSON
-      for line <- lines do
-        assert {:ok, _} = Jason.decode(line)
-      end
+      assert {:ok, ^json1, state} = Stdio.receive_message(state, 5_000)
+      assert {:ok, ^json2, _state} = Stdio.receive_message(state, 1_000)
     end
 
     test "skips empty lines gracefully" do

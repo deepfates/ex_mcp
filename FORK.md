@@ -153,6 +153,23 @@ for each call site.
 This retires when upstream stops turning an output-validation timeout into a
 tool failure.
 
+### A stdio frame that arrives with another is not held back
+
+`ExMCP.Transport.Stdio.receive_message/2` (the pull path `ExMCP.ACP.Client`
+uses) kept the bytes after the first complete line in `line_buffer`, then
+waited for the next port message before looking at them. A pipe hands over
+whatever is ready, so an agent that writes a `session/update` and the prompt's
+result back to back is often read as one chunk; the result then sat in the
+buffer until the agent wrote again, which after a final response is never, and
+the caller got `{:error, :request_timeout}` after 30 seconds. The same wait
+followed a skipped banner or blank line. Found through Imp's ACP relay test,
+which failed this way in 4 of 100 runs on Linux. The buffer is now
+drained before waiting. Upstream 1.5.0 has the same code; the test
+"every frame of a chunk carrying several is delivered without more output" in
+`test/ex_mcp/transport/stdio_isolation_test.exs` fails on it.
+
+This retires when upstream drains the buffer before waiting.
+
 ## Do not contact upstream
 
 The intent above is a direction, not a licence to act on it. Nothing leaves
