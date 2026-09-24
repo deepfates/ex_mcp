@@ -128,6 +128,28 @@ safe fix — a 4xx on `initialize` is far more likely a broken endpoint or an au
 problem than evidence that the server is modern. Flipping the default would
 trade a bug we have fixed for one we cannot classify.
 
+### A missed output-validation deadline does not fail the tool call
+
+Upstream validates a tool's structured output against its output schema after
+the handler has run, under `SchemaPolicy`'s 100ms validation deadline, and
+replaces the result with an `isError` result when the deadline passes. The
+deadline measures the machine, not the output: under load (load average 25–35)
+Kite's official-SDK stdio check failed with "Output validation failed: JSON
+Schema validation exceeded 100ms" on tools whose output was correct. For a
+write, the effect had already happened, so the caller was told a completed
+post failed, and a caller that retries posts twice.
+
+`SchemaPolicy.validate_output/3` is now the one output check for the DSL, the
+deprecated `Tools` macro and `Tools.Registry`. A timeout there logs a warning
+and returns the result; a real mismatch is still an error. Input validation
+keeps the deadline, since it runs before any effect and bounds client data.
+`test/ex_mcp/server/output_validation_deadline_test.exs` restores the 100ms
+default (the suite's `test_helper.exs` widens it) and makes the validator slow
+with a sleeping custom format; on upstream's code two of its tests fail.
+
+This retires when upstream stops turning an output-validation timeout into a
+tool failure.
+
 ## Do not contact upstream
 
 The intent above is a direction, not a licence to act on it. Nothing leaves

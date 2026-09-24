@@ -20,6 +20,8 @@ defmodule ExMCP.Content.SchemaPolicy do
 
   alias ExMCP.Content.{SchemaDNS, SchemaHTTPClient, SchemaRemoteResolver}
 
+  require Logger
+
   @composition_keywords MapSet.new(~w(allOf anyOf oneOf not if then else))
   @literal_keywords MapSet.new(~w(const default enum examples))
   @reference_keywords MapSet.new(~w($ref $recursiveRef $dynamicRef))
@@ -168,6 +170,33 @@ defmodule ExMCP.Content.SchemaPolicy do
         opts[:validation_timeout_ms],
         {:schema_validation_timeout, opts[:validation_timeout_ms]}
       )
+    end
+  end
+
+  @doc """
+  Validates a tool's structured output against its output schema.
+
+  A tool's output is checked after its handler has returned, so whatever the
+  handler did has already happened. A mismatch is still an error. An expired
+  validation deadline is not: it says nothing about the output, only that the
+  validator did not finish in time, which on a loaded machine happens to
+  correct output. Reporting it as a failure would tell the caller that a
+  completed effect failed, and a caller that retries repeats the effect. So a
+  timeout here logs a warning and returns `:ok`.
+
+  Input validation keeps the deadline: it runs before the effect, so refusing
+  there is honest, and the data it bounds comes from the client.
+  """
+  @spec validate_output(term(), term(), keyword()) :: validation_result()
+  def validate_output(data, schema, opts \\ []) do
+    case validate(data, schema, opts) do
+      {:error, {:schema_validation_timeout, _timeout} = reason} ->
+        Logger.warning("Tool output returned unvalidated: " <> format_error(reason))
+
+        :ok
+
+      result ->
+        result
     end
   end
 
