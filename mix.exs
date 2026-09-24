@@ -20,7 +20,8 @@ defmodule ExMCP.MixProject do
       homepage_url: @github_url,
       test_coverage: [tool: ExCoveralls],
       dialyzer: [
-        plt_add_apps: [:mix, :ex_unit],
+        # erlexec is optional and runtime: false (OwnedProcess starts it).
+        plt_add_apps: [:mix, :ex_unit, :erlexec],
         ignore_warnings: ".dialyzer_ignore.exs",
         list_unused_filters: false,
         plt_local_path: "priv/plts",
@@ -93,6 +94,11 @@ defmodule ExMCP.MixProject do
       {:mint_web_socket, "~> 1.0"},
       {:castore, "~> 1.0"},
       {:telemetry, "~> 1.2"},
+      # OwnedProcess only, which AdapterBridge uses for an adapter's agent.
+      # Optional, so a consumer that never runs an adapter does not build
+      # erlexec's C++ port program; one that does declares {:erlexec, "~> 2.2"}
+      # itself. Started on first use (see OwnedProcess.init/1), not at boot.
+      {:erlexec, "~> 2.2", optional: true, runtime: false},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

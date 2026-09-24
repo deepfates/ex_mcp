@@ -1,7 +1,7 @@
 defmodule ExMCP.ACP.AdapterBridge.PortRunner do
   @moduledoc false
 
-  alias ExMCP.Internal.PortEnvironment
+  alias ExMCP.Internal.{OwnedProcess, PortEnvironment}
 
   @session_vars_to_clear ~w(
     CLAUDE_CODE_ENTRYPOINT CLAUDE_SESSION_ID CLAUDE_CONFIG_DIR
@@ -42,7 +42,34 @@ defmodule ExMCP.ACP.AdapterBridge.PortRunner do
     end
   end
 
-  @spec command(port(), iodata()) :: :ok | {:error, term()}
+  @doc """
+  Opens the bridge's agent subprocess as an owned process group.
+
+  Unlike `open/4`'s raw port, closing the handle, or the death of the process
+  that opened it, ends the agent and everything it started (see
+  `ExMCP.Internal.OwnedProcess`). The handle sends the same
+  `{handle, {:data, data}}` and `{handle, {:exit_status, code}}` messages a
+  port does.
+  """
+  @spec open_owned(String.t(), [String.t()], keyword(), module()) ::
+          {:ok, OwnedProcess.t()} | {:error, term()}
+  def open_owned(cmd, args, opts, adapter_mod) do
+    with :ok <- PortEnvironment.validate_policy(opts),
+         executable when is_binary(executable) <- System.find_executable(cmd) do
+      OwnedProcess.open(executable, args,
+        cd: Keyword.get(opts, :cwd, File.cwd!()),
+        env: safe_env(opts, adapter_mod),
+        inherit_environment: Keyword.get(opts, :environment_policy, :isolated) == :inherit
+      )
+    else
+      nil -> {:error, {:executable_not_found, cmd}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec command(port() | OwnedProcess.t(), iodata()) :: :ok | {:error, term()}
+  def command(%OwnedProcess{} = process, data), do: OwnedProcess.command(process, data)
+
   def command(port, data) do
     Port.command(port, data)
     :ok
@@ -50,8 +77,9 @@ defmodule ExMCP.ACP.AdapterBridge.PortRunner do
     :error, reason -> {:error, reason}
   end
 
-  @spec close(port() | nil) :: :ok
+  @spec close(port() | OwnedProcess.t() | nil) :: :ok | {:error, term()}
   def close(nil), do: :ok
+  def close(%OwnedProcess{} = process), do: OwnedProcess.close(process)
 
   def close(port) do
     Port.close(port)

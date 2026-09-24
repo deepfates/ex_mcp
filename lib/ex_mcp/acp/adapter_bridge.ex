@@ -286,7 +286,8 @@ defmodule ExMCP.ACP.AdapterBridge do
 
   # Private helpers
 
-  defp open_port(cmd, args, opts, adapter_mod), do: PortRunner.open(cmd, args, opts, adapter_mod)
+  defp open_port(cmd, args, opts, adapter_mod),
+    do: PortRunner.open_owned(cmd, args, opts, adapter_mod)
 
   defp synthesize_result(state, request_id, result) do
     push_message(state, request_id |> Envelope.response(result) |> Jason.encode!())
@@ -1290,7 +1291,10 @@ defmodule ExMCP.ACP.AdapterBridge do
   end
 
   defp do_close(%{port: port} = state) do
-    PortRunner.close(port)
+    case PortRunner.close(port) do
+      :ok -> :ok
+      {:error, reason} -> exit({:adapter_process_close_failed, reason})
+    end
 
     state =
       state
