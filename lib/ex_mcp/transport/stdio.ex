@@ -339,8 +339,12 @@ defmodule ExMCP.Transport.Stdio do
   @spec receive_message(%__MODULE__{}, timeout()) ::
           {:ok, binary(), %__MODULE__{}} | {:error, any()}
   def receive_message(%__MODULE__{port: port} = state, timeout) do
+    # One port message can carry several frames. The ones after the first stay
+    # in `line_buffer`, so the buffer is drained before waiting for more output:
+    # otherwise a buffered frame is delivered only when the program next writes,
+    # which after a request's final response may be never.
     case OwnedProcess.transfer(port, self()) do
-      :ok -> receive_loop(state, timeout)
+      :ok -> process_received_buffer(state.line_buffer, state, timeout)
       {:error, :closed} -> Error.connection_error(:closed)
     end
   end
@@ -462,13 +466,12 @@ defmodule ExMCP.Transport.Stdio do
 
         cond do
           trimmed == "" ->
-            # Empty line, continue
-            receive_loop(%{state | line_buffer: rest}, timeout)
+            process_received_buffer(rest, state, timeout)
 
           # Skip non-JSON output like "Secure MCP Filesystem Server..."
           not String.starts_with?(trimmed, "{") and not String.starts_with?(trimmed, "[") ->
             Logger.debug("Skipping non-JSON output", line_shape: LogSummary.describe(trimmed))
-            receive_loop(%{state | line_buffer: rest}, timeout)
+            process_received_buffer(rest, state, timeout)
 
           true ->
             # Return the JSON line and update state
