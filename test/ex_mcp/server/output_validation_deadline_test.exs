@@ -60,6 +60,31 @@ defmodule ExMCP.Server.OutputValidationDeadlineTest do
     end
   end
 
+  defmodule LegacyServer do
+    use ExMCP.Server.Handler
+    use ExMCP.Server.Tools
+
+    tool "post" do
+      description("Performs an effect, then returns output checked by a slow format")
+
+      output_schema(%{
+        type: "object",
+        properties: %{uri: %{type: "string", format: "slow"}},
+        required: ["uri"]
+      })
+
+      handle(fn _args, state ->
+        send(state.effects, :posted)
+
+        {:ok,
+         %{
+           content: [%{type: "text", text: "posted"}],
+           structuredContent: %{uri: "at://did:plc:alice/app.bsky.feed.post/1"}
+         }, state}
+      end)
+    end
+  end
+
   setup do
     restore = [
       {:ex_json_schema, :custom_format_validator,
@@ -101,6 +126,21 @@ defmodule ExMCP.Server.OutputValidationDeadlineTest do
              Server.handle_call_tool("wrong_shape", %{}, %{effects: self()})
 
     assert response.isError
+  end
+
+  test "a Tools macro tool whose output validation times out returns its result" do
+    log =
+      capture_log(fn ->
+        assert {:ok, response, _state} =
+                 LegacyServer.handle_call_tool("post", %{}, %{effects: self()})
+
+        send(self(), {:response, response})
+      end)
+
+    assert_received {:response, response}
+    assert log =~ "Tool output returned unvalidated"
+    assert_received :posted
+    refute response[:isError]
   end
 
   test "a registry tool whose output validation times out returns its result" do

@@ -142,10 +142,13 @@ post failed, and a caller that retries posts twice.
 `SchemaPolicy.validate_output/3` is now the one output check for the DSL, the
 deprecated `Tools` macro and `Tools.Registry`. A timeout there logs a warning
 and returns the result; a real mismatch is still an error. Input validation
-keeps the deadline, since it runs before any effect and bounds client data.
+(`Helpers.validate_tool_args/2`; the server does not check tool arguments
+against `inputSchema` itself) keeps the deadline, since it runs before any
+effect and bounds client data.
 `test/ex_mcp/server/output_validation_deadline_test.exs` restores the 100ms
 default (the suite's `test_helper.exs` widens it) and makes the validator slow
-with a sleeping custom format; on upstream's code two of its tests fail.
+with a sleeping custom format; on upstream's code three of its tests fail, one
+for each call site.
 
 This retires when upstream stops turning an output-validation timeout into a
 tool failure.
