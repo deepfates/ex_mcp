@@ -924,7 +924,7 @@ defmodule ExMCP.Server.DSL do
 
   defp validate_with_schema(data, schema) do
     if schema do
-      case SchemaPolicy.validate(data, schema) do
+      case SchemaPolicy.validate_output(data, schema) do
         :ok ->
           :ok
 
