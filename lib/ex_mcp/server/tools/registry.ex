@@ -196,7 +196,7 @@ defmodule ExMCP.Server.Tools.Registry do
         {:error, [SchemaPolicy.format_error(reason)]}
 
       _resolved ->
-        case SchemaPolicy.validate(data, schema) do
+        case SchemaPolicy.validate_output(data, schema) do
           :ok ->
             :ok
 

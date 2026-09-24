@@ -201,7 +201,7 @@ defmodule ExMCP.Server.Tools do
   @doc false
   def validate_with_schema(data, resolved_schema) do
     if resolved_schema do
-      case SchemaPolicy.validate(data, resolved_schema) do
+      case SchemaPolicy.validate_output(data, resolved_schema) do
         :ok ->
           :ok
 

@@ -38,10 +38,12 @@ Code.ensure_loaded(ExMCP.Compliance.VersionGenerator)
 # Enable test mode for SSE handlers to prevent blocking in tests
 Application.put_env(:ex_mcp, :test_mode, true)
 
-# Keep the production validation deadline tight while allowing for scheduler
-# contention from highly concurrent test runs. Deadline behavior is tested with
-# explicit per-call overrides in SchemaPolicyTest.
-Application.put_env(:ex_mcp, :json_schema, validation_timeout_ms: 1_000)
+# Tests of what validation decides must not depend on how busy the machine is.
+# A missed output deadline returns the tool's result rather than an error, so
+# under load a 1s deadline turned a schema-mismatch test into a pass-through.
+# Deadline behavior is tested with explicit overrides in SchemaPolicyTest and
+# with the 100ms default in OutputValidationDeadlineTest.
+Application.put_env(:ex_mcp, :json_schema, validation_timeout_ms: 30_000)
 
 # Don't stop the application - let tests that need it have access to it
 # Individual tests can stop/restart if needed for isolation
