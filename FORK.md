@@ -37,7 +37,8 @@ What each consumer depends on, and the test there that fails without it:
   in session/new `_meta`, and fails closed without them.
 - **Haven**: the five ACP client patches and owned adapter subprocesses. Its
   `ClientHandler` returns `{:async, ...}` for every long callback and plain
-  refusal text, and `RunServer` places event barriers.
+  refusal text, and `Haven.ACP.Bridge` places event barriers and relies on the
+  two initialize failures to report an agent that cannot start.
 
 ## Patch notes
 
@@ -67,10 +68,31 @@ on use because the port program exits with status 4 when `SHELL` is unset,
 which is how an MCP host that spawns a program (Kite's stdio server) often
 starts it; starting erlexec with ExMCP kept such a program from booting.
 
-A candidate for retiring this patch without upstream: `ExMCP.ACP.Adapter`
-allows `command/1` to return `:adapter_managed`, and Pi's adapter owns its own
-ports that way. A Haven adapter could wrap Codex and start the app-server with
-Haven's own erlexec process instead. Not built.
+Why this is not done from Haven instead. Haven already owns its other agents'
+processes with erlexec (`Haven.AgentProcess`), and `ExMCP.ACP.Adapter` lets an
+adapter return `:adapter_managed` from `command/1` and run its own subprocess,
+as Pi's adapter does. A Haven wrapper around the Codex adapter could start
+`codex app-server` through `Haven.AgentProcess` that way, but only by redoing
+the bridge's port handling in Haven:
+
+- In managed mode the bridge opens nothing and writes nothing. The Codex
+  adapter's `translate_outbound/2` answers with data for the bridge to write
+  (`{:ok, iodata, _}` and three `*_and_write` shapes), and with no port the
+  bridge answers each with `{:error, :no_port}`; `translate_inbound/2` does the
+  same (`:messages_and_write`, `:skip_and_write`). The wrapper would rewrite
+  every one of those shapes, and send the adapter's `post_connect/1` initialize
+  handshake itself, which the bridge only sends for a port it opened.
+- The bridge has no way for a managed adapter to say its process ended: its
+  status stays `:ready` and a waiting `receive_message/2` is never answered, so
+  the client would not see the agent exit unless the adapter crashed the bridge.
+- The line framing and buffer limits the bridge applies to port data would be
+  written again.
+
+That is a second copy of `AdapterBridge`'s process handling, with no
+end-to-end Codex test in Haven to hold it. The small fix is upstream: an
+`AdapterBridge` option that takes a launcher (open, write, close) instead of
+`Port.open/2`, so a host can supply an owned process. That would need an
+upstream pull request, which the owner sees first.
 
 ## Moved out of the fork into our code
 
@@ -100,11 +122,11 @@ Each of these was a fork patch until 1.5.0. Where it went, and why:
   Imp (`Imp.MCP.Connections`).
 - **Application-owned OAuth browser flow and issuer-matching discovery**: Imp
   (`Imp.MCP.OAuth.Flow`) and Haven (`Haven.MCPOAuth.Flow`, a copy).
-- **`connection_info/1`**: Haven. `agent_capabilities/1` and `auth_methods/1`
-  already exist, 1.5.0 itself refuses any protocol version but 1, and Haven
-  knows the client capabilities it sent; the one missing field, `agentInfo`, is
-  captured from the initialize result by a thin wrapper around Haven's
-  transports' `receive_message/1`.
+- **`connection_info/1`**: Haven (`Haven.ACP.Transport.Initialize`). A thin
+  transport wrapper around Haven's agent transports reports the initialize
+  request's params and the agent's initialize result to the process calling
+  `start_link/1`, and Haven records them as before; `agentInfo` is readable no
+  other way.
 - **Fixed upstream by 1.5.0**: duplicate Codex final messages (upstream emits
   only the unstreamed remainder).
 - **Codex approvals reaching the person**: not fixed upstream in general, and not
